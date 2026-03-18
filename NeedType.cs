@@ -1,4 +1,5 @@
 ﻿public enum NeedType
 {
-	Comfort
+	Comfort,
+	Hunger
 }
