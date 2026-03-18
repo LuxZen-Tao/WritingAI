@@ -75,10 +75,11 @@ public class RoomArea : MonoBehaviour
 
     public bool ContainsPoint(Vector3 worldPoint)
     {
-        if (!TryGetRoomBounds(out Bounds bounds))
+        if (!TryGetRoomCollider(out Collider roomCollider))
             return false;
 
-        return bounds.Contains(worldPoint);
+        Vector3 closestPoint = roomCollider.ClosestPoint(worldPoint);
+        return (closestPoint - worldPoint).sqrMagnitude <= 0.0001f;
     }
 
     public bool TryGetRandomPointInBounds(float inset, out Vector3 worldPoint)
@@ -99,15 +100,36 @@ public class RoomArea : MonoBehaviour
         if (minX > maxX || minZ > maxZ)
             return false;
 
-        worldPoint = new Vector3(
-            Random.Range(minX, maxX),
-            transform.position.y,
-            Random.Range(minZ, maxZ));
+        for (int i = 0; i < 8; i++)
+        {
+            Vector3 candidate = new Vector3(
+                Random.Range(minX, maxX),
+                transform.position.y,
+                Random.Range(minZ, maxZ));
 
-        return true;
+            if (!ContainsPoint(candidate))
+                continue;
+
+            worldPoint = candidate;
+            return true;
+        }
+
+        return false;
     }
 
     private bool TryGetRoomBounds(out Bounds bounds)
+    {
+        if (!TryGetRoomCollider(out Collider roomCollider))
+        {
+            bounds = default;
+            return false;
+        }
+
+        bounds = roomCollider.bounds;
+        return true;
+    }
+
+    private bool TryGetRoomCollider(out Collider roomCollider)
     {
         if (cachedRoomCollider == null)
         {
@@ -119,13 +141,7 @@ public class RoomArea : MonoBehaviour
             }
         }
 
-        if (cachedRoomCollider == null)
-        {
-            bounds = default;
-            return false;
-        }
-
-        bounds = cachedRoomCollider.bounds;
-        return true;
+        roomCollider = cachedRoomCollider;
+        return roomCollider != null;
     }
 }

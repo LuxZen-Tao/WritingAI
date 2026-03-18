@@ -962,6 +962,21 @@ public class SimpleNPCBrain : MonoBehaviour
         ResolveCurrentRoom();
     }
 
+    private void OnTriggerStay(Collider other)
+    {
+        RoomArea room = other.GetComponentInParent<RoomArea>();
+
+        if (room == null)
+            return;
+
+        if (!overlappingRooms.Contains(room))
+        {
+            overlappingRooms.Add(room);
+        }
+
+        ResolveCurrentRoom();
+    }
+
     private void OnTriggerExit(Collider other)
     {
         RoomArea room = other.GetComponentInParent<RoomArea>();
@@ -975,8 +990,10 @@ public class SimpleNPCBrain : MonoBehaviour
 
     private void ResolveCurrentRoom()
     {
-        RoomArea bestRoom = null;
-        float bestDistanceSqr = Mathf.Infinity;
+        RoomArea containingRoom = null;
+        float containingDistanceSqr = Mathf.Infinity;
+        RoomArea fallbackRoom = null;
+        float fallbackDistanceSqr = Mathf.Infinity;
 
         for (int i = overlappingRooms.Count - 1; i >= 0; i--)
         {
@@ -988,14 +1005,25 @@ public class SimpleNPCBrain : MonoBehaviour
             }
 
             float distanceSqr = (room.transform.position - transform.position).sqrMagnitude;
-            if (distanceSqr < bestDistanceSqr)
+
+            if (room.ContainsPoint(transform.position))
             {
-                bestDistanceSqr = distanceSqr;
-                bestRoom = room;
+                if (distanceSqr < containingDistanceSqr)
+                {
+                    containingDistanceSqr = distanceSqr;
+                    containingRoom = room;
+                }
+                continue;
+            }
+
+            if (distanceSqr < fallbackDistanceSqr)
+            {
+                fallbackDistanceSqr = distanceSqr;
+                fallbackRoom = room;
             }
         }
 
-        currentRoom = bestRoom;
+        currentRoom = containingRoom != null ? containingRoom : fallbackRoom;
     }
 
     private bool IsNeedUrgent(NeedType needType)
