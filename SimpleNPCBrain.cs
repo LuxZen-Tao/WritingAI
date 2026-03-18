@@ -129,7 +129,15 @@ public class SimpleNPCBrain : MonoBehaviour
 
         if (HasUrgentNeed())
         {
-            currentNeedType = needsManager.GetMostUrgentNeed();
+            NeedType mostUrgentNeed = needsManager.GetMostUrgentNeed();
+            bool needChanged = mostUrgentNeed != currentNeedType;
+            currentNeedType = mostUrgentNeed;
+
+            if (needChanged && IsNeedDrivenState(currentState))
+            {
+                RestartNeedSearch();
+                return;
+            }
 
             if (IsNeedCurrentlySatisfied(currentNeedType))
             {
@@ -976,6 +984,17 @@ public class SimpleNPCBrain : MonoBehaviour
         hasIdlePoint = false;
         agent.ResetPath();
         ChangeState(AIState.IdleWander);
+    }
+
+    private void RestartNeedSearch()
+    {
+        currentTarget = null;
+        currentMemoryTarget = null;
+        currentComfortZoneTarget = null;
+        hasExplorePoint = false;
+        hasIdlePoint = false;
+        agent.ResetPath();
+        ChangeState(AIState.Explore);
     }
 
     private void ChangeState(AIState newState)
