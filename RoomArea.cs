@@ -17,25 +17,13 @@ public class RoomArea : MonoBehaviour
 
     public bool IsLit()
     {
-        // Daylight can light the room without any switch use
         if (receivesDaylight && isDaytime)
         {
             return true;
         }
 
-        // Otherwise check artificial lights
-        if (controlledLights != null && controlledLights.Length > 0)
-        {
-            for (int i = 0; i < controlledLights.Length; i++)
-            {
-                if (controlledLights[i] != null && controlledLights[i].enabled)
-                {
-                    return true;
-                }
-            }
-
-            return false;
-        }
+        if (HasControlledLights())
+            return AnyControlledLightOn();
 
         return fallbackLitState;
     }
@@ -44,7 +32,7 @@ public class RoomArea : MonoBehaviour
     {
         fallbackLitState = litState;
 
-        if (controlledLights != null && controlledLights.Length > 0)
+        if (HasControlledLights())
         {
             for (int i = 0; i < controlledLights.Length; i++)
             {
@@ -60,19 +48,27 @@ public class RoomArea : MonoBehaviour
 
     public bool AreArtificialLightsOn()
     {
-        if (controlledLights != null && controlledLights.Length > 0)
-        {
-            for (int i = 0; i < controlledLights.Length; i++)
-            {
-                if (controlledLights[i] != null && controlledLights[i].enabled)
-                {
-                    return true;
-                }
-            }
-
-            return false;
-        }
+        if (HasControlledLights())
+            return AnyControlledLightOn();
 
         return fallbackLitState;
+    }
+
+    private bool HasControlledLights()
+    {
+        return controlledLights != null && controlledLights.Length > 0;
+    }
+
+    private bool AnyControlledLightOn()
+    {
+        for (int i = 0; i < controlledLights.Length; i++)
+        {
+            if (controlledLights[i] != null && controlledLights[i].enabled)
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 }
