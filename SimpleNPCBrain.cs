@@ -267,11 +267,15 @@ public class SimpleNPCBrain : MonoBehaviour
 		if (currentNeedType == NeedType.Comfort && TryMoveToVisibleComfortZone())
 			return;
 
-		// 4. Remembered lit room
+// 4. Remembered lit room
 		if (currentNeedType == NeedType.Comfort && TryMoveToRememberedComfortZone())
 			return;
 
-		// 5. Broad explore
+// 5. Remembered room with comfort potential
+		if (currentNeedType == NeedType.Comfort && TryMoveToRememberedPotentialComfortZone())
+			return;
+
+// 6. Broad explore
 		agent.speed = needMoveSpeed;
 		exploreTimer += Time.deltaTime;
 
@@ -503,19 +507,16 @@ public class SimpleNPCBrain : MonoBehaviour
 			if (room == null)
 				continue;
 
-			if (!room.IsLit())
-				continue;
-
 			Vector3 roomPoint = room.GetRoomCenterPoint();
 
 			if (!CanSeePoint(roomPoint))
 				continue;
 
-			RememberComfortZone(room, roomPoint);
+			RememberComfortZone(room, roomPoint, room.IsLit());
 		}
 	}
 
-	private void RememberComfortZone(RoomArea room, Vector3 position)
+	private void RememberComfortZone(RoomArea room, Vector3 position, bool wasLit)
 	{
 		if (room == null)
 			return;
@@ -526,11 +527,12 @@ public class SimpleNPCBrain : MonoBehaviour
 			{
 				rememberedComfortZones[i].lastKnownPosition = position;
 				rememberedComfortZones[i].lastSeenTime = Time.time;
+				rememberedComfortZones[i].wasLitWhenLastSeen = wasLit;
 				return;
 			}
 		}
 
-		rememberedComfortZones.Add(new RememberedComfortZone(room, position, Time.time));
+		rememberedComfortZones.Add(new RememberedComfortZone(room, position, Time.time, wasLit));
 	}
 
 	private void CleanupComfortZoneMemory()
@@ -568,8 +570,12 @@ public class SimpleNPCBrain : MonoBehaviour
 		if (bestRoom == null)
 			return false;
 
-		RememberComfortZone(bestRoom, bestRoom.GetRoomCenterPoint());
-		currentComfortZoneTarget = new RememberedComfortZone(bestRoom, bestRoom.GetRoomCenterPoint(), Time.time);
+		Vector3 bestPoint = bestRoom.GetRoomCenterPoint();
+		bool wasLit = bestRoom.IsLit();
+
+		RememberComfortZone(bestRoom, bestPoint, wasLit);
+		currentComfortZoneTarget = new RememberedComfortZone(bestRoom, bestPoint, Time.time, wasLit);
+
 		currentMemoryTarget = null;
 		currentTarget = null;
 		hasExplorePoint = false;
@@ -591,7 +597,10 @@ public class SimpleNPCBrain : MonoBehaviour
 			if (zone == null || zone.room == null)
 				continue;
 
-			if (!zone.room.IsLit())
+			bool currentlyLit = zone.room.IsLit();
+			bool knownLit = currentlyLit || zone.wasLitWhenLastSeen;
+
+			if (!knownLit)
 				continue;
 
 			if (!IsPathReachable(zone.lastKnownPosition))
@@ -830,7 +839,15 @@ public class SimpleNPCBrain : MonoBehaviour
 
 			if (!agent.pathPending && agent.remainingDistance <= rememberedComfortZoneStopDistance)
 			{
-				AbortCurrentNeedAction();
+				if (IsComfortCurrentlySatisfied())
+				{
+					AbortCurrentNeedAction();
+				}
+				else
+				{
+					currentComfortZoneTarget = null;
+					ChangeState(AIState.Explore);
+				}
 			}
 
 			return;
@@ -1147,5 +1164,41 @@ public class SimpleNPCBrain : MonoBehaviour
 			Gizmos.DrawSphere(currentComfortZoneTarget.lastKnownPosition, 0.25f);
 			Gizmos.DrawLine(transform.position, currentComfortZoneTarget.lastKnownPosition);
 		}
+	}
+	
+	private bool TryMoveToRememberedPotentialComfortZone()
+	{
+		RememberedComfortZone bestZone = null;
+		float bestDistance = Mathf.Infinity;
+
+		for (int i = 0; i < rememberedComfortZones.Count; i++)
+		{
+			RememberedComfortZone zone = rememberedComfortZones[i];
+
+			if (zone == null || zone.room == null)
+				continue;
+
+			if (!IsPathReachable(zone.lastKnownPosition))
+				continue;
+
+			float distance = Vector3.Distance(transform.position, zone.lastKnownPosition);
+			if (distance < bestDistance)
+			{
+				bestDistance = distance;
+				bestZone = zone;
+			}
+		}
+
+		if (bestZone == null)
+			return false;
+
+		currentComfortZoneTarget = bestZone;
+		currentMemoryTarget = null;
+		currentTarget = null;
+		hasExplorePoint = false;
+		hasIdlePoint = false;
+		agent.ResetPath();
+		ChangeState(AIState.MoveToRememberedTarget);
+		return true;
 	}
 }
