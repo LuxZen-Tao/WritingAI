@@ -46,8 +46,6 @@ public class LightSwitchInteractable : Interactable, INeedSatisfier
 
     public float GetNeedValue()
     {
-        // No direct comfort reward from touching the switch.
-        // Comfort should come from the room being lit over time.
         return 0f;
     }
 }

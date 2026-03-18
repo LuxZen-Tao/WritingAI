@@ -17,20 +17,6 @@ public class SimpleNPCBrain : MonoBehaviour
         InteractWithTarget
     }
 
-    private struct VisibleSatisfierInfo
-    {
-        public Interactable interactable;
-        public INeedSatisfier satisfier;
-        public float distance;
-
-        public VisibleSatisfierInfo(Interactable interactable, INeedSatisfier satisfier, float distance)
-        {
-            this.interactable = interactable;
-            this.satisfier = satisfier;
-            this.distance = distance;
-        }
-    }
-
     [Header("State")]
     public AIState currentState = AIState.Idle;
 
@@ -42,13 +28,12 @@ public class SimpleNPCBrain : MonoBehaviour
     public float comfort = 10f;
     public float maxComfort = 10f;
     public float comfortThreshold = 5f;
-    public float comfortUrgencyHysteresis = 0.75f;
     public float comfortDecayRate = 2f;
     public float comfortRecoveryRate = 1f;
 
-    [Header("Room Context")]
+    [Header("Area Context")]
     public RoomArea currentRoom;
-    public RoomArea defaultWorldArea;
+    public WorldArea worldArea;
 
     [Header("Vision")]
     public float visionRange = 8f;
@@ -57,7 +42,6 @@ public class SimpleNPCBrain : MonoBehaviour
     public LayerMask interactableLayer;
     public LayerMask obstacleLayer;
     public Transform eyePoint;
-    public float perceptionInterval = 0.15f;
 
     [Header("Search")]
     public float searchTurnSpeed = 60f;
@@ -73,49 +57,34 @@ public class SimpleNPCBrain : MonoBehaviour
     public float idleWanderDuration = 4f;
     public float idleWanderStopDistance = 0.5f;
     public float idlePauseDuration = 2f;
-
-    [Header("Navigation")]
-    public float destinationRepathThreshold = 0.1f;
-    public float randomPointMinDistance = 0.5f;
+    public float minimumIdleMoveDistance = 1.0f;
 
     [Header("Memory - Interactables")]
     public List<RememberedInteractable> memory = new List<RememberedInteractable>();
     public float rememberedTargetStopDistance = 1f;
-    public float interactableMemoryDuration = 120f;
-    public int maxRememberedInteractables = 64;
+    public float interactableMemoryDuration = 60f;
 
     [Header("Memory - Locations")]
     public List<RememberedLocation> rememberedLocations = new List<RememberedLocation>();
     public float locationMemoryDuration = 10f;
     public float locationAvoidanceRadius = 2f;
-    public int maxRememberedLocations = 96;
 
     [Header("Current Target")]
     public Interactable currentTarget;
 
-    private readonly Collider[] perceptionHits = new Collider[64];
-    private readonly List<VisibleSatisfierInfo> visibleSatisfiers = new List<VisibleSatisfierInfo>();
-    private readonly List<RoomArea> overlappingRooms = new List<RoomArea>();
-
     private NavMeshAgent agent;
-    private float searchTimer;
-    private float exploreTimer;
-    private float idleTimer;
-    private float perceptionTimer;
+    private float searchTimer = 0f;
+    private float exploreTimer = 0f;
+    private float idleTimer = 0f;
 
     private Vector3 currentExplorePoint;
-    private bool hasExplorePoint;
+    private bool hasExplorePoint = false;
 
     private Vector3 currentIdlePoint;
-    private bool hasIdlePoint;
+    private bool hasIdlePoint = false;
 
     private RememberedInteractable currentMemoryTarget;
     private NeedType currentNeedType = NeedType.Comfort;
-    private bool comfortNeedActive;
-
-    private Vector3 lastDestination = Vector3.positiveInfinity;
-    private bool hasLastDestination;
-    private bool hasLoggedLayerWarning;
 
     private void Start()
     {
@@ -128,26 +97,15 @@ public class SimpleNPCBrain : MonoBehaviour
             return;
         }
 
-        ValidateConfiguration();
-        RefreshComfortUrgency();
-        RefreshPerception();
         ChangeState(AIState.CheckNeed);
     }
 
     private void Update()
     {
         UpdateComfort();
-        RefreshComfortUrgency();
-
         CleanupLocationMemory();
-        ForgetInvalidMemories();
-
-        perceptionTimer += Time.deltaTime;
-        if (perceptionTimer >= perceptionInterval)
-        {
-            perceptionTimer = 0f;
-            RefreshPerception();
-        }
+        CleanupInteractableMemory();
+        PassiveObserveVisibleInteractables();
 
         switch (currentState)
         {
@@ -189,31 +147,41 @@ public class SimpleNPCBrain : MonoBehaviour
         }
     }
 
-    private void ValidateConfiguration()
-    {
-        if (interactableLayer.value == 0 || obstacleLayer.value == 0)
-        {
-            hasLoggedLayerWarning = true;
-            Debug.LogWarning(gameObject.name + " has empty interactable/obstacle layer mask configuration.");
-        }
-    }
-
-    private RoomArea GetActiveArea()
+    private bool IsCurrentAreaLit()
     {
         if (currentRoom != null)
-            return currentRoom;
+        {
+            return currentRoom.IsLit();
+        }
 
-        return defaultWorldArea;
+        if (worldArea != null)
+        {
+            return worldArea.IsDaytime();
+        }
+
+        return false;
+    }
+
+    private string GetCurrentAreaName()
+    {
+        if (currentRoom != null)
+        {
+            return currentRoom.roomName;
+        }
+
+        if (worldArea != null)
+        {
+            return worldArea.worldName;
+        }
+
+        return "Unknown Area";
     }
 
     private void UpdateComfort()
     {
-        RoomArea activeArea = GetActiveArea();
+        bool areaIsLit = IsCurrentAreaLit();
 
-        if (activeArea == null)
-            return;
-
-        if (!activeArea.IsLit())
+        if (!areaIsLit)
         {
             comfort -= comfortDecayRate * Time.deltaTime;
         }
@@ -225,42 +193,47 @@ public class SimpleNPCBrain : MonoBehaviour
         comfort = Mathf.Clamp(comfort, 0f, maxComfort);
     }
 
-    private void RefreshComfortUrgency()
+    private bool HasUrgentNeed()
     {
-        float resolveThreshold = comfortThreshold + comfortUrgencyHysteresis;
-
-        if (comfortNeedActive)
-        {
-            if (comfort >= resolveThreshold)
-            {
-                comfortNeedActive = false;
-            }
-
-            return;
-        }
-
-        comfortNeedActive = comfort < comfortThreshold;
+        return comfort < comfortThreshold;
     }
 
     private void EvaluateNeeds()
     {
-        if (IsNeedUrgent(NeedType.Comfort))
+        if (HasUrgentNeed())
         {
             currentNeedType = NeedType.Comfort;
-            ChangeState(AIState.FindTarget);
-            return;
-        }
 
-        ChangeState(AIState.Idle);
+            if (currentRoom != null && currentRoom.IsLit())
+            {
+                ChangeState(AIState.Idle);
+                return;
+            }
+
+            Debug.Log("Comfort is low in " + GetCurrentAreaName() + ". Looking for something to improve comfort.");
+            ChangeState(AIState.FindTarget);
+        }
+        else
+        {
+            ChangeState(AIState.Idle);
+        }
     }
 
     private void HandleIdleState()
     {
-        if (IsNeedUrgent(NeedType.Comfort))
+        if (HasUrgentNeed())
         {
             currentNeedType = NeedType.Comfort;
-            ChangeState(AIState.FindTarget);
-            return;
+
+            if (currentRoom != null && currentRoom.IsLit())
+            {
+                // Need is recovering in a valid comfort zone, but can still wander locally
+            }
+            else
+            {
+                ChangeState(AIState.FindTarget);
+                return;
+            }
         }
 
         idleTimer += Time.deltaTime;
@@ -274,15 +247,20 @@ public class SimpleNPCBrain : MonoBehaviour
 
     private void HandleIdleWander()
     {
-        if (IsNeedUrgent(NeedType.Comfort))
+        agent.speed = idleMoveSpeed;
+
+        if (HasUrgentNeed())
         {
             currentNeedType = NeedType.Comfort;
-            ClearCurrentIntent(true);
-            ChangeState(AIState.FindTarget);
-            return;
-        }
 
-        agent.speed = idleMoveSpeed;
+            if (!(currentRoom != null && currentRoom.IsLit()))
+            {
+                hasIdlePoint = false;
+                agent.ResetPath();
+                ChangeState(AIState.FindTarget);
+                return;
+            }
+        }
 
         if (!hasIdlePoint)
         {
@@ -290,24 +268,19 @@ public class SimpleNPCBrain : MonoBehaviour
 
             if (!foundPoint)
             {
+                agent.ResetPath();
                 ChangeState(AIState.Idle);
                 return;
             }
         }
 
-        SetDestinationIfNeeded(currentIdlePoint);
+        agent.SetDestination(currentIdlePoint);
 
         if (!agent.pathPending && agent.remainingDistance <= idleWanderStopDistance)
         {
-            RememberLocation(currentIdlePoint);
+            // No recent-location memory for idle wandering
             hasIdlePoint = false;
-            ChangeState(AIState.Idle);
-            return;
-        }
-
-        if (HasInvalidCurrentPath())
-        {
-            hasIdlePoint = false;
+            agent.ResetPath();
             ChangeState(AIState.Idle);
             return;
         }
@@ -316,152 +289,158 @@ public class SimpleNPCBrain : MonoBehaviour
 
         if (idleTimer >= idleWanderDuration)
         {
-            RememberLocation(currentIdlePoint);
+            // No recent-location memory for idle wandering
             hasIdlePoint = false;
             idleTimer = 0f;
+            agent.ResetPath();
             ChangeState(AIState.Idle);
         }
     }
 
     private void FindBestTargetForNeed(NeedType needType)
     {
-        if (!IsNeedUrgent(needType))
-        {
-            AbortCurrentNeedAction();
-            return;
-        }
-
-        if (needType == NeedType.Comfort)
-        {
-            RoomArea activeArea = GetActiveArea();
-            if (activeArea != null && activeArea.IsLit())
-            {
-                ChangeState(AIState.Idle);
-                return;
-            }
-        }
-
         if (TryAcquireVisibleTarget(needType))
             return;
 
         if (TryUseRememberedTarget(needType))
             return;
 
+        Debug.Log("No visible or remembered target found for " + needType + ". Searching...");
         searchTimer = 0f;
         ChangeState(AIState.Search);
     }
 
-    private void RefreshPerception()
+    private void PassiveObserveVisibleInteractables()
     {
-        if (!hasLoggedLayerWarning && (interactableLayer.value == 0 || obstacleLayer.value == 0))
+        Collider[] hits = Physics.OverlapSphere(transform.position, visionRange, interactableLayer);
+
+        foreach (Collider hit in hits)
         {
-            hasLoggedLayerWarning = true;
-            Debug.LogWarning(gameObject.name + " has empty interactable/obstacle layer mask configuration.");
-        }
-
-        visibleSatisfiers.Clear();
-
-        int hitCount = Physics.OverlapSphereNonAlloc(transform.position, visionRange, perceptionHits, interactableLayer);
-
-        for (int i = 0; i < hitCount; i++)
-        {
-            Collider hit = perceptionHits[i];
-
-            if (hit == null)
-                continue;
-
             Interactable interactable = hit.GetComponentInParent<Interactable>();
 
-            if (interactable == null || !interactable.isEnabled)
+            if (interactable == null)
+                continue;
+
+            if (!interactable.isEnabled)
                 continue;
 
             if (!CanSeeInteractable(interactable))
                 continue;
 
             INeedSatisfier satisfier = interactable as INeedSatisfier;
+
             if (satisfier == null)
                 continue;
 
-            float distance = Vector3.Distance(transform.position, interactable.GetInteractionPoint());
-            visibleSatisfiers.Add(new VisibleSatisfierInfo(interactable, satisfier, distance));
             RememberInteractable(interactable, satisfier.GetNeedType());
         }
     }
 
     private bool TryAcquireVisibleTarget(NeedType needType)
     {
+        Collider[] hits = Physics.OverlapSphere(transform.position, visionRange, interactableLayer);
+
         Interactable bestTarget = null;
         float bestDistance = Mathf.Infinity;
 
-        for (int i = 0; i < visibleSatisfiers.Count; i++)
+        foreach (Collider hit in hits)
         {
-            VisibleSatisfierInfo entry = visibleSatisfiers[i];
+            Interactable interactable = hit.GetComponentInParent<Interactable>();
 
-            if (entry.satisfier.GetNeedType() != needType)
+            if (interactable == null)
                 continue;
 
-            if (!entry.interactable.CanInteract(gameObject))
+            if (!interactable.isEnabled)
                 continue;
 
-            if (entry.distance < bestDistance)
+            if (!CanSeeInteractable(interactable))
+                continue;
+
+            INeedSatisfier satisfier = interactable as INeedSatisfier;
+
+            if (satisfier == null)
+                continue;
+
+            if (satisfier.GetNeedType() != needType)
+                continue;
+
+            if (!interactable.CanInteract(gameObject))
+                continue;
+
+            RememberInteractable(interactable, needType);
+
+            float distance = Vector3.Distance(transform.position, interactable.GetInteractionPoint());
+
+            if (distance < bestDistance)
             {
-                bestDistance = entry.distance;
-                bestTarget = entry.interactable;
+                bestDistance = distance;
+                bestTarget = interactable;
             }
         }
 
-        if (bestTarget == null)
-            return false;
+        if (bestTarget != null)
+        {
+            currentTarget = bestTarget;
+            currentMemoryTarget = null;
+            hasExplorePoint = false;
+            hasIdlePoint = false;
+            agent.ResetPath();
 
-        currentTarget = bestTarget;
-        currentMemoryTarget = null;
-        hasExplorePoint = false;
-        hasIdlePoint = false;
-        ResetNavigationTracking();
+            Debug.Log("Locked visible target: " + bestTarget.interactableName);
+            ChangeState(AIState.MoveToTarget);
+            return true;
+        }
 
-        ChangeState(AIState.MoveToTarget);
-        return true;
+        return false;
     }
 
     private bool TryUseRememberedTarget(NeedType needType)
     {
-        RememberedInteractable bestMemory = null;
-        float bestScore = Mathf.Infinity;
+        ForgetInvalidMemories();
 
-        for (int i = 0; i < memory.Count; i++)
+        RememberedInteractable bestMemory = null;
+        float bestDistance = Mathf.Infinity;
+
+        foreach (RememberedInteractable remembered in memory)
         {
-            RememberedInteractable remembered = memory[i];
-            if (remembered == null || remembered.interactable == null)
+            if (remembered == null)
+                continue;
+
+            if (remembered.interactable == null)
                 continue;
 
             if (remembered.needType != needType)
                 continue;
 
-            if (!remembered.interactable.isEnabled || !remembered.interactable.CanInteract(gameObject))
+            if (!remembered.interactable.isEnabled)
+                continue;
+
+            if (!remembered.interactable.CanInteract(gameObject))
                 continue;
 
             float distance = Vector3.Distance(transform.position, remembered.lastKnownPosition);
-            float recencyPenalty = (Time.time - remembered.lastSeenTime) * 0.1f;
-            float score = distance + recencyPenalty;
 
-            if (score < bestScore)
+            if (distance < bestDistance)
             {
-                bestScore = score;
+                bestDistance = distance;
                 bestMemory = remembered;
             }
         }
 
-        if (bestMemory == null)
-            return false;
+        if (bestMemory != null)
+        {
+            currentMemoryTarget = bestMemory;
+            currentTarget = bestMemory.interactable;
+            hasExplorePoint = false;
+            hasIdlePoint = false;
+            agent.ResetPath();
 
-        currentMemoryTarget = bestMemory;
-        currentTarget = bestMemory.interactable;
-        hasExplorePoint = false;
-        hasIdlePoint = false;
-        ResetNavigationTracking();
+            Debug.Log("Using remembered target: " + bestMemory.interactable.interactableName);
+            ChangeState(AIState.MoveToRememberedTarget);
+            return true;
+        }
 
-        ChangeState(AIState.MoveToRememberedTarget);
-        return true;
+        return false;
     }
 
     private void RememberInteractable(Interactable interactable, NeedType needType)
@@ -471,76 +450,39 @@ public class SimpleNPCBrain : MonoBehaviour
 
         for (int i = 0; i < memory.Count; i++)
         {
-            RememberedInteractable remembered = memory[i];
-            if (remembered != null && remembered.interactable == interactable)
+            if (memory[i] != null && memory[i].interactable == interactable)
             {
-                remembered.lastKnownPosition = interactable.GetInteractionPoint();
-                remembered.needType = needType;
-                remembered.lastSeenTime = Time.time;
+                memory[i].lastKnownPosition = interactable.GetInteractionPoint();
+                memory[i].needType = needType;
+                memory[i].lastSeenTime = Time.time;
                 return;
             }
         }
 
-        if (memory.Count >= maxRememberedInteractables)
-        {
-            RemoveOldestInteractableMemory();
-        }
-
-        memory.Add(new RememberedInteractable(interactable, needType, interactable.GetInteractionPoint(), Time.time));
-    }
-
-    private void RemoveOldestInteractableMemory()
-    {
-        int oldestIndex = -1;
-        float oldestTime = Mathf.Infinity;
-
-        for (int i = 0; i < memory.Count; i++)
-        {
-            RememberedInteractable remembered = memory[i];
-            if (remembered == null)
-            {
-                oldestIndex = i;
-                break;
-            }
-
-            if (remembered.lastSeenTime < oldestTime)
-            {
-                oldestTime = remembered.lastSeenTime;
-                oldestIndex = i;
-            }
-        }
-
-        if (oldestIndex >= 0)
-        {
-            memory.RemoveAt(oldestIndex);
-        }
+        memory.Add(new RememberedInteractable(
+            interactable,
+            needType,
+            interactable.GetInteractionPoint(),
+            Time.time
+        ));
     }
 
     private void ForgetInvalidMemories()
     {
+        memory.RemoveAll(m => m == null || m.interactable == null);
+    }
+
+    private void CleanupInteractableMemory()
+    {
         memory.RemoveAll(m =>
             m == null ||
             m.interactable == null ||
-            Time.time - m.lastSeenTime > interactableMemoryDuration);
+            Time.time - m.lastSeenTime > interactableMemoryDuration
+        );
     }
 
     private void RememberLocation(Vector3 position)
     {
-        for (int i = 0; i < rememberedLocations.Count; i++)
-        {
-            if (Vector3.Distance(rememberedLocations[i].position, position) <= locationAvoidanceRadius * 0.5f)
-            {
-                rememberedLocations[i].position = position;
-                rememberedLocations[i].timeStored = Time.time;
-                return;
-            }
-        }
-
-        if (rememberedLocations.Count >= maxRememberedLocations)
-        {
-            rememberedLocations.RemoveAt(0);
-        }
-
         rememberedLocations.Add(new RememberedLocation(position, Time.time));
     }
 
@@ -551,9 +493,9 @@ public class SimpleNPCBrain : MonoBehaviour
 
     private bool IsRecentlyVisited(Vector3 position)
     {
-        for (int i = 0; i < rememberedLocations.Count; i++)
+        foreach (RememberedLocation loc in rememberedLocations)
         {
-            if (Vector3.Distance(position, rememberedLocations[i].position) <= locationAvoidanceRadius)
+            if (Vector3.Distance(position, loc.position) <= locationAvoidanceRadius)
             {
                 return true;
             }
@@ -577,23 +519,20 @@ public class SimpleNPCBrain : MonoBehaviour
             return false;
 
         float angleToTarget = Vector3.Angle(transform.forward, directionToTarget);
+
         if (angleToTarget > visionAngle * 0.5f)
             return false;
 
         if (Physics.Raycast(origin, directionToTarget.normalized, out RaycastHit hit, distanceToTarget, obstacleLayer))
+        {
             return false;
+        }
 
         return true;
     }
 
     private void SearchForTarget()
     {
-        if (!IsNeedUrgent(currentNeedType))
-        {
-            AbortCurrentNeedAction();
-            return;
-        }
-
         if (TryAcquireVisibleTarget(currentNeedType))
             return;
 
@@ -609,12 +548,6 @@ public class SimpleNPCBrain : MonoBehaviour
 
     private void ExploreForTarget()
     {
-        if (!IsNeedUrgent(currentNeedType))
-        {
-            AbortCurrentNeedAction();
-            return;
-        }
-
         if (TryAcquireVisibleTarget(currentNeedType))
             return;
 
@@ -627,20 +560,21 @@ public class SimpleNPCBrain : MonoBehaviour
 
             if (!foundPoint)
             {
+                Debug.Log("Could not find explore point. Returning to search.");
                 exploreTimer = 0f;
                 ChangeState(AIState.Search);
                 return;
             }
         }
 
-        SetDestinationIfNeeded(currentExplorePoint);
+        agent.SetDestination(currentExplorePoint);
 
         if (!agent.pathPending && agent.remainingDistance <= exploreStopDistance)
         {
             RememberLocation(currentExplorePoint);
             exploreTimer = 0f;
             hasExplorePoint = false;
-            ResetNavigationTracking();
+            agent.ResetPath();
 
             if (TryAcquireVisibleTarget(currentNeedType))
                 return;
@@ -652,19 +586,12 @@ public class SimpleNPCBrain : MonoBehaviour
             return;
         }
 
-        if (HasInvalidCurrentPath())
-        {
-            hasExplorePoint = false;
-            ChangeState(AIState.Search);
-            return;
-        }
-
         if (exploreTimer >= exploreDuration)
         {
             RememberLocation(currentExplorePoint);
             exploreTimer = 0f;
             hasExplorePoint = false;
-            ResetNavigationTracking();
+            agent.ResetPath();
 
             if (TryAcquireVisibleTarget(currentNeedType))
                 return;
@@ -683,9 +610,6 @@ public class SimpleNPCBrain : MonoBehaviour
             Vector3 randomOffset = Random.insideUnitSphere * exploreRadius;
             randomOffset.y = 0f;
 
-            if (randomOffset.sqrMagnitude < randomPointMinDistance * randomPointMinDistance)
-                continue;
-
             Vector3 candidatePoint = transform.position + randomOffset;
 
             if (IsRecentlyVisited(candidatePoint))
@@ -699,6 +623,8 @@ public class SimpleNPCBrain : MonoBehaviour
                 currentExplorePoint = navHit.position;
                 hasExplorePoint = true;
                 exploreTimer = 0f;
+
+                Debug.Log("New explore point chosen: " + currentExplorePoint);
                 return true;
             }
         }
@@ -718,19 +644,14 @@ public class SimpleNPCBrain : MonoBehaviour
             Vector3 randomOffset = Random.insideUnitSphere * idleWanderRadius;
             randomOffset.y = 0f;
 
-            if (randomOffset.sqrMagnitude < randomPointMinDistance * randomPointMinDistance)
-                continue;
-
             Vector3 candidatePoint = transform.position + randomOffset;
 
-            if (IsRecentlyVisited(candidatePoint))
+            float distanceFromCurrent = Vector3.Distance(transform.position, candidatePoint);
+            if (distanceFromCurrent < minimumIdleMoveDistance)
                 continue;
 
             if (NavMesh.SamplePosition(candidatePoint, out NavMeshHit navHit, 2f, NavMesh.AllAreas))
             {
-                if (IsRecentlyVisited(navHit.position))
-                    continue;
-
                 currentIdlePoint = navHit.position;
                 hasIdlePoint = true;
                 idleTimer = 0f;
@@ -766,6 +687,18 @@ public class SimpleNPCBrain : MonoBehaviour
         return false;
     }
 
+    private void AbortCurrentNeedAction()
+    {
+        currentTarget = null;
+        currentMemoryTarget = null;
+        hasExplorePoint = false;
+        hasIdlePoint = false;
+        agent.ResetPath();
+
+        Debug.Log("Need no longer urgent. Aborting current target/action.");
+        ChangeState(AIState.Idle);
+    }
+
     private void MoveToCurrentTarget()
     {
         if (!IsNeedUrgent(currentNeedType))
@@ -776,18 +709,15 @@ public class SimpleNPCBrain : MonoBehaviour
 
         if (currentTarget == null)
         {
-            ChangeState(AIState.FindTarget);
-            return;
-        }
-
-        if (!currentTarget.CanInteract(gameObject) || !currentTarget.isEnabled)
-        {
-            ChangeState(AIState.FindTarget);
+            Debug.LogWarning("No target to move to.");
+            ChangeState(AIState.Idle);
             return;
         }
 
         agent.speed = needMoveSpeed;
-        SetDestinationIfNeeded(currentTarget.GetInteractionPoint());
+
+        Vector3 targetPosition = currentTarget.GetInteractionPoint();
+        agent.SetDestination(targetPosition);
 
         if (!agent.pathPending && agent.remainingDistance <= currentTarget.interactionRange)
         {
@@ -798,13 +728,6 @@ public class SimpleNPCBrain : MonoBehaviour
             }
 
             ChangeState(AIState.InteractWithTarget);
-            return;
-        }
-
-        if (HasInvalidCurrentPath())
-        {
-            currentTarget = null;
-            ChangeState(AIState.FindTarget);
         }
     }
 
@@ -818,6 +741,7 @@ public class SimpleNPCBrain : MonoBehaviour
 
         if (currentMemoryTarget == null || currentMemoryTarget.interactable == null)
         {
+            Debug.Log("Remembered target is no longer valid.");
             currentMemoryTarget = null;
             currentTarget = null;
             ChangeState(AIState.FindTarget);
@@ -828,7 +752,7 @@ public class SimpleNPCBrain : MonoBehaviour
             return;
 
         agent.speed = needMoveSpeed;
-        SetDestinationIfNeeded(currentMemoryTarget.lastKnownPosition);
+        agent.SetDestination(currentMemoryTarget.lastKnownPosition);
 
         if (!agent.pathPending && agent.remainingDistance <= rememberedTargetStopDistance)
         {
@@ -848,15 +772,6 @@ public class SimpleNPCBrain : MonoBehaviour
             currentMemoryTarget = null;
             currentTarget = null;
             ChangeState(AIState.FindTarget);
-            return;
-        }
-
-        if (HasInvalidCurrentPath())
-        {
-            memory.Remove(currentMemoryTarget);
-            currentMemoryTarget = null;
-            currentTarget = null;
-            ChangeState(AIState.FindTarget);
         }
     }
 
@@ -864,55 +779,23 @@ public class SimpleNPCBrain : MonoBehaviour
     {
         if (currentTarget == null)
         {
-            ChangeState(AIState.FindTarget);
+            Debug.LogWarning("No target to interact with.");
+            ChangeState(AIState.Idle);
             return;
         }
 
         agent.ResetPath();
-        ResetNavigationTracking();
 
         if (currentTarget.CanInteract(gameObject))
         {
             currentTarget.Interact(gameObject);
         }
 
-        ClearCurrentIntent(false);
+        currentTarget = null;
+        currentMemoryTarget = null;
+        hasExplorePoint = false;
+        hasIdlePoint = false;
         ChangeState(AIState.Idle);
-    }
-
-    private void SetDestinationIfNeeded(Vector3 destination)
-    {
-        if (!hasLastDestination)
-        {
-            agent.SetDestination(destination);
-            lastDestination = destination;
-            hasLastDestination = true;
-            return;
-        }
-
-        if (Vector3.Distance(lastDestination, destination) <= destinationRepathThreshold)
-            return;
-
-        agent.SetDestination(destination);
-        lastDestination = destination;
-    }
-
-    private bool HasInvalidCurrentPath()
-    {
-        if (agent.pathPending)
-            return false;
-
-        if (!agent.hasPath)
-            return true;
-
-        return agent.pathStatus == NavMeshPathStatus.PathInvalid || agent.pathStatus == NavMeshPathStatus.PathPartial;
-    }
-
-    private void ResetNavigationTracking()
-    {
-        hasLastDestination = false;
-        lastDestination = Vector3.positiveInfinity;
-        agent.ResetPath();
     }
 
     private void ChangeState(AIState newState)
@@ -921,12 +804,13 @@ public class SimpleNPCBrain : MonoBehaviour
             return;
 
         currentState = newState;
+        Debug.Log("State changed to: " + currentState);
 
         switch (currentState)
         {
             case AIState.Search:
                 searchTimer = 0f;
-                ResetNavigationTracking();
+                agent.ResetPath();
                 break;
 
             case AIState.Explore:
@@ -937,7 +821,7 @@ public class SimpleNPCBrain : MonoBehaviour
             case AIState.Idle:
                 idleTimer = 0f;
                 hasIdlePoint = false;
-                ResetNavigationTracking();
+                agent.ResetPath();
                 break;
 
             case AIState.IdleWander:
@@ -966,15 +850,11 @@ public class SimpleNPCBrain : MonoBehaviour
     {
         RoomArea room = other.GetComponentInParent<RoomArea>();
 
-        if (room == null)
-            return;
-
-        if (!overlappingRooms.Contains(room))
+        if (room != null)
         {
-            overlappingRooms.Add(room);
+            currentRoom = room;
+            Debug.Log(gameObject.name + " entered room: " + room.roomName);
         }
-
-        ResolveCurrentRoom();
     }
 
     private void OnTriggerExit(Collider other)
