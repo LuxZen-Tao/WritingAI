@@ -260,8 +260,10 @@ public class SimpleNPCBrain : MonoBehaviour
         if (currentNeedType == NeedType.Comfort)
         {
             RoomArea activeArea = GetActiveArea();
-            if (activeArea != null && activeArea.IsLit() && comfort >= comfortThreshold)
+            if (activeArea != null && activeArea.IsLit())
             {
+                // Room is already lit — environment is handling comfort recovery.
+                // Return to Idle so we don't re-interact with the switch and toggle it off.
                 ChangeState(AIState.Idle);
                 return;
             }
@@ -480,6 +482,12 @@ public class SimpleNPCBrain : MonoBehaviour
 
     private void SearchForTarget()
     {
+        if (!IsNeedUrgent(currentNeedType))
+        {
+            AbortCurrentNeedAction();
+            return;
+        }
+
         if (TryAcquireVisibleTarget(currentNeedType))
             return;
 
@@ -495,6 +503,12 @@ public class SimpleNPCBrain : MonoBehaviour
 
     private void ExploreForTarget()
     {
+        if (!IsNeedUrgent(currentNeedType))
+        {
+            AbortCurrentNeedAction();
+            return;
+        }
+
         if (TryAcquireVisibleTarget(currentNeedType))
             return;
 
