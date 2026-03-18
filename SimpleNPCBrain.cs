@@ -20,12 +20,8 @@ public class SimpleNPCBrain : MonoBehaviour
     public float idleMoveSpeed = 1f;
     public float needMoveSpeed = 2.5f;
 
-    [Header("Comfort")]
-    public float comfort = 10f;
-    public float maxComfort = 10f;
-    public float comfortThreshold = 5f;
-    public float comfortDecayRate = 2f;
-    public float comfortRecoveryRate = 1f;
+    [Header("Needs")]
+    public NeedsManager needsManager;
 
     [Header("Area Context")]
     public RoomArea currentRoom;
@@ -102,6 +98,18 @@ public class SimpleNPCBrain : MonoBehaviour
             return;
         }
 
+        if (needsManager == null)
+        {
+            needsManager = GetComponent<NeedsManager>();
+        }
+
+        if (needsManager == null)
+        {
+            Debug.LogError("No NeedsManager found on " + gameObject.name);
+            enabled = false;
+            return;
+        }
+
         knownRooms = FindObjectsByType<RoomArea>(FindObjectsSortMode.None);
 
         currentState = AIState.IdleWander;
@@ -111,7 +119,7 @@ public class SimpleNPCBrain : MonoBehaviour
 
     private void Update()
     {
-        UpdateComfort();
+        needsManager.TickNeeds(IsCurrentAreaLit(), Time.deltaTime);
         CleanupLocationMemory();
         CleanupInteractableMemory();
         CleanupComfortZoneMemory();
@@ -121,9 +129,9 @@ public class SimpleNPCBrain : MonoBehaviour
 
         if (HasUrgentNeed())
         {
-            currentNeedType = NeedType.Comfort;
+            currentNeedType = needsManager.GetMostUrgentNeed();
 
-            if (IsComfortCurrentlySatisfied())
+            if (IsNeedCurrentlySatisfied(currentNeedType))
             {
                 if (IsNeedDrivenState(currentState))
                 {
@@ -131,12 +139,9 @@ public class SimpleNPCBrain : MonoBehaviour
                     return;
                 }
             }
-            else
+            else if (currentState == AIState.IdleWander)
             {
-                if (currentState == AIState.IdleWander)
-                {
-                    ChangeState(AIState.Explore);
-                }
+                ChangeState(AIState.Explore);
             }
         }
         else if (IsNeedDrivenState(currentState))
@@ -180,28 +185,17 @@ public class SimpleNPCBrain : MonoBehaviour
         return false;
     }
 
-    private bool IsComfortCurrentlySatisfied()
+    private bool IsNeedCurrentlySatisfied(NeedType needType)
     {
-        return currentNeedType == NeedType.Comfort && IsCurrentAreaLit();
-    }
+        if (needType == NeedType.Comfort)
+            return IsCurrentAreaLit();
 
-    private void UpdateComfort()
-    {
-        if (!IsCurrentAreaLit())
-        {
-            comfort -= comfortDecayRate * Time.deltaTime;
-        }
-        else
-        {
-            comfort += comfortRecoveryRate * Time.deltaTime;
-        }
-
-        comfort = Mathf.Clamp(comfort, 0f, maxComfort);
+        return !needsManager.IsNeedUrgent(needType);
     }
 
     private bool HasUrgentNeed()
     {
-        return comfort < comfortThreshold;
+        return needsManager != null && needsManager.HasUrgentNeed();
     }
 
     private bool IsNeedDrivenState(AIState state)
@@ -253,7 +247,7 @@ public class SimpleNPCBrain : MonoBehaviour
 
     private void ExploreForTarget()
     {
-        if (currentNeedType == NeedType.Comfort && IsComfortCurrentlySatisfied())
+        if (IsNeedCurrentlySatisfied(currentNeedType))
         {
             AbortCurrentNeedAction();
             return;
@@ -837,7 +831,7 @@ public class SimpleNPCBrain : MonoBehaviour
             return;
         }
 
-        if (currentNeedType == NeedType.Comfort && IsComfortCurrentlySatisfied())
+        if (IsNeedCurrentlySatisfied(currentNeedType))
         {
             AbortCurrentNeedAction();
             return;
@@ -867,7 +861,7 @@ public class SimpleNPCBrain : MonoBehaviour
             return;
         }
 
-        if (currentNeedType == NeedType.Comfort && IsComfortCurrentlySatisfied())
+        if (IsNeedCurrentlySatisfied(currentNeedType))
         {
             AbortCurrentNeedAction();
             return;
@@ -888,7 +882,7 @@ public class SimpleNPCBrain : MonoBehaviour
 
             if (!agent.pathPending && agent.remainingDistance <= rememberedComfortZoneStopDistance)
             {
-                if (IsComfortCurrentlySatisfied())
+                if (IsNeedCurrentlySatisfied(NeedType.Comfort))
                 {
                     AbortCurrentNeedAction();
                 }
@@ -959,7 +953,7 @@ public class SimpleNPCBrain : MonoBehaviour
         hasExplorePoint = false;
         hasIdlePoint = false;
 
-        if (currentNeedType == NeedType.Comfort && IsComfortCurrentlySatisfied())
+        if (IsNeedCurrentlySatisfied(currentNeedType))
         {
             ChangeState(AIState.IdleWander);
         }
