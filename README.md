@@ -21,7 +21,7 @@ The goal is to create a system where complexity emerges naturally as more system
 
 ### 🔹 Needs System
 
-- NPCs have internal states (currently: **comfort**)
+- NPCs have internal states (currently: **comfort** and **hunger**)
 - Needs increase or decrease over time depending on environment
 - Behaviour is driven by need thresholds
 
@@ -129,7 +129,9 @@ Need decreases (e.g., dark room)
 
 ## 🧪 Current Features
 
-- ✅ Needs-driven AI (Comfort)
+- ✅ Needs-driven AI (Comfort + Hunger)
+- ✅ Modular `NeedsManager` foundation for additional needs
+- ✅ Apple interactable that restores hunger
 - ✅ Vision-based perception (FOV + raycasting)
 - ✅ Passive world observation during all states
 - ✅ Interactable memory (object + need + last known position)
