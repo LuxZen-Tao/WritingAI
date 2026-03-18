@@ -152,6 +152,16 @@ public class NeedsManager : MonoBehaviour
         return IsNeedUrgent(state);
     }
 
+    public bool ShouldOpportunisticallySatisfy(NeedType needType)
+    {
+        NeedState state = GetState(needType);
+        if (state == null)
+            return false;
+
+        NeedUrgencyBand band = GetNeedUrgencyBand(state);
+        return band == NeedUrgencyBand.Low;
+    }
+
     public NeedUrgencyBand GetNeedUrgencyBand(NeedType needType)
     {
         NeedState state = GetState(needType);

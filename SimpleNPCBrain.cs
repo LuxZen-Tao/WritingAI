@@ -44,6 +44,9 @@ public class SimpleNPCBrain : MonoBehaviour
     public float exploreRecheckInterval = 0.75f;
     private float exploreRecheckTimer = 0f;
 
+    [Header("Opportunistic Needs")]
+    public float opportunisticTargetMaxDistance = 2.5f;
+
     [Header("Idle Wander")]
     public float idleWanderRadius = 3f;
     public float idleWanderStopDistance = 0.5f;
@@ -89,6 +92,7 @@ public class SimpleNPCBrain : MonoBehaviour
     private RememberedInteractable currentMemoryTarget;
     private RememberedComfortZone currentComfortZoneTarget;
     private NeedType currentNeedType = NeedType.Comfort;
+    private bool currentNeedActionIsUrgentDriven = false;
 
     private readonly Dictionary<NeedType, NeedsManager.NeedUrgencyBand> lastNeedBands = new Dictionary<NeedType, NeedsManager.NeedUrgencyBand>();
     private readonly Dictionary<NeedType, bool> lastNeedUrgentFlags = new Dictionary<NeedType, bool>();
@@ -143,6 +147,7 @@ public class SimpleNPCBrain : MonoBehaviour
         {
             bool needChanged = mostUrgentNeed != currentNeedType;
             currentNeedType = mostUrgentNeed;
+            currentNeedActionIsUrgentDriven = true;
 
             if (needChanged && IsNeedDrivenState(currentState))
             {
@@ -176,6 +181,11 @@ public class SimpleNPCBrain : MonoBehaviour
             Narrate("I feel okay again. Back to wandering.", "return-to-idle-no-urgent");
             AbortCurrentNeedAction();
             return;
+        }
+        else if (currentState == AIState.IdleWander)
+        {
+            if (TryHandleOpportunisticNeed())
+                return;
         }
 
         switch (currentState)
@@ -614,30 +624,9 @@ public class SimpleNPCBrain : MonoBehaviour
         );
     }
 
-    private bool TryMoveToVisibleComfortZone()
+    private bool TryMoveToVisibleComfortZone(float maxDistance = Mathf.Infinity)
     {
-        List<RoomArea> visibleRooms = GetVisibleComfortRooms();
-
-        RoomArea bestRoom = null;
-        float bestDistance = Mathf.Infinity;
-
-        for (int i = 0; i < visibleRooms.Count; i++)
-        {
-            RoomArea room = visibleRooms[i];
-            if (room == null)
-                continue;
-
-            Vector3 point = room.GetRoomCenterPoint();
-            float distance = Vector3.Distance(transform.position, point);
-
-            if (distance < bestDistance)
-            {
-                bestDistance = distance;
-                bestRoom = room;
-            }
-        }
-
-        if (bestRoom == null)
+        if (!TryFindBestVisibleComfortRoom(maxDistance, out RoomArea bestRoom, out _))
             return false;
 
         Vector3 bestPoint = bestRoom.GetRoomCenterPoint();
@@ -805,43 +794,13 @@ public class SimpleNPCBrain : MonoBehaviour
         }
     }
 
-    private bool TryAcquireVisibleTarget(NeedType needType)
+    private bool TryAcquireVisibleTarget(NeedType needType, float maxDistance = Mathf.Infinity)
     {
-        Collider[] hits = Physics.OverlapSphere(transform.position, visionRange, interactableLayer);
-
-        Interactable bestTarget = null;
-        float bestDistance = Mathf.Infinity;
-
-        foreach (Collider hit in hits)
-        {
-            Interactable interactable = hit.GetComponentInParent<Interactable>();
-
-            if (interactable == null || !interactable.isEnabled)
-                continue;
-
-            if (!CanSeeInteractable(interactable))
-                continue;
-
-            INeedSatisfier satisfier = interactable as INeedSatisfier;
-            if (satisfier == null || satisfier.GetNeedType() != needType)
-                continue;
-
-            if (!interactable.CanInteract(gameObject))
-                continue;
-
-            Narrate("I see something that could help.", "perception-visible-interactable");
-            RememberInteractable(interactable, needType);
-
-            float distance = Vector3.Distance(transform.position, interactable.GetInteractionPoint());
-            if (distance < bestDistance)
-            {
-                bestDistance = distance;
-                bestTarget = interactable;
-            }
-        }
-
-        if (bestTarget == null)
+        if (!TryFindBestVisibleTarget(needType, maxDistance, out Interactable bestTarget, out _))
             return false;
+
+        Narrate("I see something that could help.", "perception-visible-interactable");
+        RememberInteractable(bestTarget, needType);
 
         Narrate(Pick(
             "That's exactly what I need.",
@@ -908,7 +867,7 @@ public class SimpleNPCBrain : MonoBehaviour
 
     private void MoveToCurrentTarget()
     {
-        if (!HasUrgentNeed())
+        if (currentNeedActionIsUrgentDriven && !HasUrgentNeed())
         {
             Narrate("I don't need this anymore.", "move-target-no-urgent");
             AbortCurrentNeedAction();
@@ -925,7 +884,7 @@ public class SimpleNPCBrain : MonoBehaviour
         if (currentTarget == null)
         {
             Narrate("I lost the target. I'll search again.", "move-target-lost");
-            ChangeState(AIState.Explore);
+            HandleNeedActionFailure();
             return;
         }
 
@@ -941,7 +900,7 @@ public class SimpleNPCBrain : MonoBehaviour
 
     private void MoveToRememberedTarget()
     {
-        if (!HasUrgentNeed())
+        if (currentNeedActionIsUrgentDriven && !HasUrgentNeed())
         {
             Narrate("I'm okay now. No need to keep chasing this.", "move-remembered-no-urgent");
             AbortCurrentNeedAction();
@@ -961,7 +920,7 @@ public class SimpleNPCBrain : MonoBehaviour
             {
                 Narrate("That place is gone... I'll keep searching.", "move-remembered-comfort-missing-room");
                 currentComfortZoneTarget = null;
-                ChangeState(AIState.Explore);
+                HandleNeedActionFailure();
                 return;
             }
 
@@ -979,7 +938,7 @@ public class SimpleNPCBrain : MonoBehaviour
                 {
                     Narrate("Still not enough comfort here. I need another option.", "move-remembered-comfort-fallback");
                     currentComfortZoneTarget = null;
-                    ChangeState(AIState.Explore);
+                    HandleNeedActionFailure();
                 }
             }
 
@@ -991,7 +950,7 @@ public class SimpleNPCBrain : MonoBehaviour
             Narrate("That lead went cold. I'll look for something else.", "move-remembered-invalid");
             currentMemoryTarget = null;
             currentTarget = null;
-            ChangeState(AIState.Explore);
+            HandleNeedActionFailure();
             return;
         }
 
@@ -1014,13 +973,13 @@ public class SimpleNPCBrain : MonoBehaviour
             memory.Remove(currentMemoryTarget);
             currentMemoryTarget = null;
             currentTarget = null;
-            ChangeState(AIState.Explore);
+            HandleNeedActionFailure();
         }
     }
 
     private void InteractWithCurrentTarget()
     {
-        if (!HasUrgentNeed())
+        if (currentNeedActionIsUrgentDriven && !HasUrgentNeed())
         {
             Narrate("Never mind, I don't need this right now.", "interact-no-urgent");
             AbortCurrentNeedAction();
@@ -1030,7 +989,7 @@ public class SimpleNPCBrain : MonoBehaviour
         if (currentTarget == null)
         {
             Narrate("No target to use... I'll search again.", "interact-missing-target");
-            ChangeState(AIState.Explore);
+            HandleNeedActionFailure();
             return;
         }
 
@@ -1083,6 +1042,7 @@ public class SimpleNPCBrain : MonoBehaviour
         currentTarget = null;
         currentMemoryTarget = null;
         currentComfortZoneTarget = null;
+        currentNeedActionIsUrgentDriven = false;
         hasExplorePoint = false;
         hasIdlePoint = false;
         agent.ResetPath();
@@ -1094,6 +1054,7 @@ public class SimpleNPCBrain : MonoBehaviour
         currentTarget = null;
         currentMemoryTarget = null;
         currentComfortZoneTarget = null;
+        currentNeedActionIsUrgentDriven = true;
         hasExplorePoint = false;
         hasIdlePoint = false;
         agent.ResetPath();
@@ -1106,6 +1067,17 @@ public class SimpleNPCBrain : MonoBehaviour
             return needMoveSpeed;
 
         return needMoveSpeed * needsManager.GetNeedMoveSpeedMultiplier(currentNeedType);
+    }
+
+    private void HandleNeedActionFailure()
+    {
+        if (currentNeedActionIsUrgentDriven || HasUrgentNeed())
+        {
+            ChangeState(AIState.Explore);
+            return;
+        }
+
+        AbortCurrentNeedAction();
     }
 
     private void ChangeState(AIState newState)
@@ -1473,6 +1445,135 @@ public class SimpleNPCBrain : MonoBehaviour
             default:
                 return "I'll keep going.";
         }
+    }
+
+    private bool TryHandleOpportunisticNeed()
+    {
+        if (needsManager == null || needsManager.needs == null)
+            return false;
+
+        if (needsManager.HasUrgentNeed())
+            return false;
+
+        NeedType bestNeed = NeedType.Comfort;
+        float bestScore = float.MinValue;
+        bool foundOpportunity = false;
+
+        for (int i = 0; i < needsManager.needs.Count; i++)
+        {
+            NeedsManager.NeedState need = needsManager.needs[i];
+            if (need == null)
+                continue;
+
+            NeedType needType = need.needType;
+            if (!needsManager.ShouldOpportunisticallySatisfy(needType))
+                continue;
+
+            if (!HasEasyVisibleOpportunity(needType))
+                continue;
+
+            float score = needsManager.GetNeedPriorityScore(needType);
+            if (score <= bestScore)
+                continue;
+
+            bestNeed = needType;
+            bestScore = score;
+            foundOpportunity = true;
+        }
+
+        if (!foundOpportunity)
+            return false;
+
+        currentNeedType = bestNeed;
+        currentNeedActionIsUrgentDriven = false;
+
+        if (bestNeed == NeedType.Comfort)
+        {
+            if (TryMoveToVisibleComfortZone(opportunisticTargetMaxDistance))
+            {
+                Narrate("That nearby lit area could help a little.", "opportunity-comfort-room");
+                return true;
+            }
+        }
+
+        if (TryAcquireVisibleTarget(bestNeed, opportunisticTargetMaxDistance))
+        {
+            Narrate("Easy opportunity. I'll handle this quickly.", "opportunity-interactable");
+            return true;
+        }
+
+        return false;
+    }
+
+    private bool HasEasyVisibleOpportunity(NeedType needType)
+    {
+        if (needType == NeedType.Comfort)
+        {
+            if (TryFindBestVisibleComfortRoom(opportunisticTargetMaxDistance, out _, out _))
+                return true;
+        }
+
+        return TryFindBestVisibleTarget(needType, opportunisticTargetMaxDistance, out _, out _);
+    }
+
+    private bool TryFindBestVisibleTarget(NeedType needType, float maxDistance, out Interactable bestTarget, out float bestDistance)
+    {
+        Collider[] hits = Physics.OverlapSphere(transform.position, visionRange, interactableLayer);
+
+        bestTarget = null;
+        bestDistance = Mathf.Infinity;
+
+        foreach (Collider hit in hits)
+        {
+            Interactable interactable = hit.GetComponentInParent<Interactable>();
+
+            if (interactable == null || !interactable.isEnabled)
+                continue;
+
+            if (!CanSeeInteractable(interactable))
+                continue;
+
+            INeedSatisfier satisfier = interactable as INeedSatisfier;
+            if (satisfier == null || satisfier.GetNeedType() != needType)
+                continue;
+
+            if (!interactable.CanInteract(gameObject))
+                continue;
+
+            float distance = Vector3.Distance(transform.position, interactable.GetInteractionPoint());
+            if (distance > maxDistance || distance >= bestDistance)
+                continue;
+
+            bestDistance = distance;
+            bestTarget = interactable;
+        }
+
+        return bestTarget != null;
+    }
+
+    private bool TryFindBestVisibleComfortRoom(float maxDistance, out RoomArea bestRoom, out float bestDistance)
+    {
+        List<RoomArea> visibleRooms = GetVisibleComfortRooms();
+        bestRoom = null;
+        bestDistance = Mathf.Infinity;
+
+        for (int i = 0; i < visibleRooms.Count; i++)
+        {
+            RoomArea room = visibleRooms[i];
+            if (room == null)
+                continue;
+
+            Vector3 point = room.GetRoomCenterPoint();
+            float distance = Vector3.Distance(transform.position, point);
+
+            if (distance > maxDistance || distance >= bestDistance)
+                continue;
+
+            bestDistance = distance;
+            bestRoom = room;
+        }
+
+        return bestRoom != null;
     }
 
     private string Pick(params string[] options)
