@@ -1,4 +1,7 @@
-using UnityEngine;
+﻿using UnityEngine;
+#if UNITY_EDITOR
+	using UnityEditor;
+#endif
 
 public class DoorController : MonoBehaviour
 {
@@ -21,6 +24,13 @@ public class DoorController : MonoBehaviour
 
     [Header("Motion")]
     [SerializeField, Min(0f)] private float moveSpeed = 4f;
+    [ContextMenu("Test Toggle Door")]
+    private void EditorTestToggle()
+    {
+        Toggle();
+    }
+    
+
 
     public bool IsOpen => isOpen;
     public bool IsTransitioning => isTransitioning;
@@ -47,36 +57,37 @@ public class DoorController : MonoBehaviour
         ApplyStateImmediate(isOpen);
     }
 
-    private void Update()
-    {
-        if (!isTransitioning)
-            return;
+	private void Update()
+	{
 
-        if (moveSpeed <= 0f)
-        {
-            ApplyStateImmediate(isOpen);
-            isTransitioning = false;
-            return;
-        }
+		if (!isTransitioning)
+			return;
 
-        float blend = 1f - Mathf.Exp(-moveSpeed * Time.deltaTime);
+		if (moveSpeed <= 0f)
+		{
+			ApplyStateImmediate(isOpen);
+			isTransitioning = false;
+			return;
+		}
 
-        if (usePosition)
-        {
-            transform.localPosition = Vector3.Lerp(transform.localPosition, targetLocalPosition, blend);
-        }
+		float blend = 1f - Mathf.Exp(-moveSpeed * Time.deltaTime);
 
-        if (useRotation)
-        {
-            transform.localRotation = Quaternion.Slerp(transform.localRotation, targetLocalRotation, blend);
-        }
+		if (usePosition)
+		{
+			transform.localPosition = Vector3.Lerp(transform.localPosition, targetLocalPosition, blend);
+		}
 
-        if (HasReachedTarget())
-        {
-            ApplyStateImmediate(isOpen);
-            isTransitioning = false;
-        }
-    }
+		if (useRotation)
+		{
+			transform.localRotation = Quaternion.Slerp(transform.localRotation, targetLocalRotation, blend);
+		}
+
+		if (HasReachedTarget())
+		{
+			ApplyStateImmediate(isOpen);
+			isTransitioning = false;
+		}
+	}
 
     public void Interact()
     {
