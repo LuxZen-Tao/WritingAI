@@ -3,199 +3,204 @@ using UnityEngine.AI;
 
 public class RoomArea : MonoBehaviour
 {
-    [Header("Room Settings")]
-    public string roomName = "Room";
+	[Header("Room Settings")]
+	public string roomName = "Room";
 
-    [Header("World Link")]
-    public WorldArea worldArea;
+	[Header("World Link")]
+	public WorldArea worldArea;
 
-    [Header("Natural Light")]
-    public bool receivesDaylight = false;
+	[Header("Natural Light")]
+	public bool receivesDaylight = false;
 
-    [Header("Artificial Lights Controlled By Switches")]
-    public Light[] controlledLights;
+	[Header("Artificial Lights Controlled By Switches")]
+	public Light[] controlledLights;
 
-    [Header("Fallback")]
-    public bool fallbackLitState = false;
-    private Collider cachedRoomCollider;
+	[Header("Fallback")]
+	public bool fallbackLitState = false;
 
-    private Collider roomCollider;
+	private Collider cachedRoomCollider;
+	private Collider roomCollider;
 
-    private void Awake()
-    {
-        roomCollider = GetComponent<Collider>();
+	private void Awake()
+	{
+		roomCollider = GetComponent<Collider>();
 
-        if (roomCollider == null)
-        {
-            Debug.LogError(roomName + " needs a Collider to define room bounds.");
-        }
-    }
+		if (roomCollider == null)
+		{
+			Debug.LogError(roomName + " needs a Collider to define room bounds.");
+		}
+	}
 
-    public bool IsLit()
-    {
-        if (HasDaylight())
-        {
-            return true;
-        }
+	public bool IsLit()
+	{
+		if (HasDaylight())
+			return true;
 
-        if (AreArtificialLightsOn())
-        {
-            return true;
-        }
+		if (AreArtificialLightsOn())
+			return true;
 
-        return fallbackLitState;
-    }
+		return fallbackLitState;
+	}
 
-    public bool HasDaylight()
-    {
-        if (!receivesDaylight)
-            return false;
+	public bool HasDaylight()
+	{
+		if (!receivesDaylight)
+			return false;
 
-        if (worldArea == null)
-            return false;
+		if (worldArea == null)
+			return false;
 
-        return worldArea.IsDaytime();
-    }
+		return worldArea.IsDaytime();
+	}
 
-    public void SetArtificialLights(bool litState)
-    {
-        fallbackLitState = litState;
+	public void SetArtificialLights(bool litState)
+	{
+		fallbackLitState = litState;
 
-        if (controlledLights != null && controlledLights.Length > 0)
-        {
-            for (int i = 0; i < controlledLights.Length; i++)
-            {
-                if (controlledLights[i] != null)
-                {
-                    controlledLights[i].enabled = litState;
-                }
-            }
-        }
+		if (controlledLights != null && controlledLights.Length > 0)
+		{
+			for (int i = 0; i < controlledLights.Length; i++)
+			{
+				if (controlledLights[i] != null)
+				{
+					controlledLights[i].enabled = litState;
+				}
+			}
+		}
 
-        Debug.Log(roomName + " artificial light state changed to: " + litState);
-    }
+		Debug.Log(roomName + " artificial light state changed to: " + litState);
+	}
 
-    public bool AreArtificialLightsOn()
-    {
-        if (controlledLights != null && controlledLights.Length > 0)
-        {
-            for (int i = 0; i < controlledLights.Length; i++)
-            {
-                if (controlledLights[i] != null && controlledLights[i].enabled)
-                {
-                    return true;
-                }
-            }
+	public bool AreArtificialLightsOn()
+	{
+		if (controlledLights != null && controlledLights.Length > 0)
+		{
+			for (int i = 0; i < controlledLights.Length; i++)
+			{
+				if (controlledLights[i] != null && controlledLights[i].enabled)
+				{
+					return true;
+				}
+			}
 
-            return false;
-        }
+			return false;
+		}
 
-        return fallbackLitState;
-    }
+		return fallbackLitState;
+	}
 
-    public bool ContainsPoint(Vector3 point)
-    {
-        if (roomCollider == null)
-            return false;
+	public bool ContainsPoint(Vector3 point)
+	{
+		if (roomCollider == null)
+			return false;
 
-        Vector3 closest = roomCollider.ClosestPoint(point);
+		Vector3 closest = roomCollider.ClosestPoint(point);
+		return Vector3.Distance(closest, point) < 0.1f;
+	}
 
-        return Vector3.Distance(closest, point) < 0.05f;
-    }
+	public Vector3 GetRoomCenterPoint()
+	{
+		if (roomCollider != null)
+		{
+			return roomCollider.bounds.center;
+		}
 
-    public bool TryGetRandomNavigablePointInsideRoom(out Vector3 point)
-    {
-        point = Vector3.zero;
+		return transform.position;
+	}
 
-        if (roomCollider == null)
-            return false;
+	public bool TryGetRandomNavigablePointInsideRoom(out Vector3 point)
+	{
+		point = Vector3.zero;
 
-        Bounds bounds = roomCollider.bounds;
+		if (roomCollider == null)
+			return false;
 
-        for (int i = 0; i < 20; i++)
-        {
-            Vector3 candidate = new Vector3(
-                Random.Range(bounds.min.x, bounds.max.x),
-                bounds.center.y,
-                Random.Range(bounds.min.z, bounds.max.z)
-            );
+		Bounds bounds = roomCollider.bounds;
 
-            if (!ContainsPoint(candidate))
-                continue;
+		for (int i = 0; i < 20; i++)
+		{
+			Vector3 candidate = new Vector3(
+				Random.Range(bounds.min.x, bounds.max.x),
+				bounds.center.y,
+				Random.Range(bounds.min.z, bounds.max.z)
+			);
 
-            if (NavMesh.SamplePosition(candidate, out NavMeshHit navHit, 1.5f, NavMesh.AllAreas))
-            {
-                if (!ContainsPoint(navHit.position))
-                    continue;
+			if (!ContainsPoint(candidate))
+				continue;
 
-                point = navHit.position;
-                return true;
-            }
-        }
+			if (NavMesh.SamplePosition(candidate, out NavMeshHit navHit, 1.5f, NavMesh.AllAreas))
+			{
+				if (!ContainsPoint(navHit.position))
+					continue;
 
-        return false;
-    }
+				point = navHit.position;
+				return true;
+			}
+		}
 
-    public bool TryGetRandomPointInBounds(float inset, out Vector3 worldPoint)
-    {
-        worldPoint = transform.position;
+		return false;
+	}
 
-        if (!TryGetRoomBounds(out Bounds bounds))
-            return false;
+	public bool TryGetRandomPointInBounds(float inset, out Vector3 worldPoint)
+	{
+		worldPoint = transform.position;
 
-        float clampedInsetX = Mathf.Clamp(inset, 0f, bounds.extents.x * 0.95f);
-        float clampedInsetZ = Mathf.Clamp(inset, 0f, bounds.extents.z * 0.95f);
+		if (!TryGetRoomBounds(out Bounds bounds))
+			return false;
 
-        float minX = bounds.min.x + clampedInsetX;
-        float maxX = bounds.max.x - clampedInsetX;
-        float minZ = bounds.min.z + clampedInsetZ;
-        float maxZ = bounds.max.z - clampedInsetZ;
+		float clampedInsetX = Mathf.Clamp(inset, 0f, bounds.extents.x * 0.95f);
+		float clampedInsetZ = Mathf.Clamp(inset, 0f, bounds.extents.z * 0.95f);
 
-        if (minX > maxX || minZ > maxZ)
-            return false;
+		float minX = bounds.min.x + clampedInsetX;
+		float maxX = bounds.max.x - clampedInsetX;
+		float minZ = bounds.min.z + clampedInsetZ;
+		float maxZ = bounds.max.z - clampedInsetZ;
 
-        for (int i = 0; i < 8; i++)
-        {
-            Vector3 candidate = new Vector3(
-                Random.Range(minX, maxX),
-                transform.position.y,
-                Random.Range(minZ, maxZ));
+		if (minX > maxX || minZ > maxZ)
+			return false;
 
-            if (!ContainsPoint(candidate))
-                continue;
+		for (int i = 0; i < 8; i++)
+		{
+			Vector3 candidate = new Vector3(
+				Random.Range(minX, maxX),
+				transform.position.y,
+				Random.Range(minZ, maxZ));
 
-            worldPoint = candidate;
-            return true;
-        }
+			if (!ContainsPoint(candidate))
+				continue;
 
-        return false;
-    }
+			worldPoint = candidate;
+			return true;
+		}
 
-    private bool TryGetRoomBounds(out Bounds bounds)
-    {
-        if (!TryGetRoomCollider(out Collider roomCollider))
-        {
-            bounds = default;
-            return false;
-        }
+		return false;
+	}
 
-        bounds = roomCollider.bounds;
-        return true;
-    }
+	private bool TryGetRoomBounds(out Bounds bounds)
+	{
+		if (!TryGetRoomCollider(out Collider foundRoomCollider))
+		{
+			bounds = default;
+			return false;
+		}
 
-    private bool TryGetRoomCollider(out Collider roomCollider)
-    {
-        if (cachedRoomCollider == null)
-        {
-            cachedRoomCollider = GetComponent<Collider>();
+		bounds = foundRoomCollider.bounds;
+		return true;
+	}
 
-            if (cachedRoomCollider == null)
-            {
-                cachedRoomCollider = GetComponentInChildren<Collider>();
-            }
-        }
+	private bool TryGetRoomCollider(out Collider foundRoomCollider)
+	{
+		if (cachedRoomCollider == null)
+		{
+			cachedRoomCollider = GetComponent<Collider>();
 
-        roomCollider = cachedRoomCollider;
-        return roomCollider != null;
-    }
+			if (cachedRoomCollider == null)
+			{
+				cachedRoomCollider = GetComponentInChildren<Collider>();
+			}
+		}
+
+		foundRoomCollider = cachedRoomCollider;
+		return foundRoomCollider != null;
+	}
 }
