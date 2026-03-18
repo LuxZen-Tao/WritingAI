@@ -1,4 +1,5 @@
 ﻿using UnityEngine;
+using UnityEngine.AI;
 #if UNITY_EDITOR
 	using UnityEditor;
 #endif
@@ -24,6 +25,10 @@ public class DoorController : MonoBehaviour
 
     [Header("Motion")]
     [SerializeField, Min(0f)] private float moveSpeed = 4f;
+
+    [Header("Navigation Blocking")]
+    [SerializeField] private Collider blockingCollider;
+    [SerializeField] private NavMeshObstacle navObstacle;
     [ContextMenu("Test Toggle Door")]
     private void EditorTestToggle()
     {
@@ -55,6 +60,7 @@ public class DoorController : MonoBehaviour
         isOpen = startsOpen;
         SetTargets(isOpen);
         ApplyStateImmediate(isOpen);
+        RefreshBlockingState();
     }
 
 	private void Update()
@@ -121,6 +127,7 @@ public class DoorController : MonoBehaviour
         isOpen = newOpenState;
         SetTargets(isOpen);
         isTransitioning = true;
+        RefreshBlockingState();
 
         if (moveSpeed <= 0f)
         {
@@ -154,5 +161,20 @@ public class DoorController : MonoBehaviour
         bool rotationReached = !useRotation || Quaternion.Angle(transform.localRotation, targetLocalRotation) <= RotationEpsilon;
 
         return positionReached && rotationReached;
+    }
+
+    public void RefreshBlockingState()
+    {
+        bool shouldBlock = !isOpen;
+
+        if (blockingCollider != null)
+        {
+            blockingCollider.enabled = shouldBlock;
+        }
+
+        if (navObstacle != null)
+        {
+            navObstacle.enabled = shouldBlock;
+        }
     }
 }
