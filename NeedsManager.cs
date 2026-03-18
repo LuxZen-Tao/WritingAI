@@ -19,9 +19,18 @@ public class NeedsManager : MonoBehaviour
         public NeedType needType = NeedType.Comfort;
         public float currentValue = 10f;
         public float maxValue = 10f;
-        public float urgentThreshold = 5f;
+        public NeedBandThresholds bandThresholds = new NeedBandThresholds();
         public float decayPerSecond = 1f;
         public float recoveryPerSecond = 0f;
+    }
+
+    [Serializable]
+    public class NeedBandThresholds
+    {
+        public float criticalThreshold = 2f;
+        public float urgentThreshold = 5f;
+        public float lowThreshold = 7f;
+        public float stableThreshold = 9f;
     }
 
     [Header("Needs")]
@@ -32,7 +41,13 @@ public class NeedsManager : MonoBehaviour
             needType = NeedType.Comfort,
             currentValue = 10f,
             maxValue = 10f,
-            urgentThreshold = 5f,
+            bandThresholds = new NeedBandThresholds
+            {
+                criticalThreshold = 2f,
+                urgentThreshold = 5f,
+                lowThreshold = 7f,
+                stableThreshold = 9f
+            },
             decayPerSecond = 2f,
             recoveryPerSecond = 1f
         },
@@ -41,7 +56,13 @@ public class NeedsManager : MonoBehaviour
             needType = NeedType.Hunger,
             currentValue = 10f,
             maxValue = 10f,
-            urgentThreshold = 4f,
+            bandThresholds = new NeedBandThresholds
+            {
+                criticalThreshold = 2f,
+                urgentThreshold = 4f,
+                lowThreshold = 7f,
+                stableThreshold = 9f
+            },
             decayPerSecond = 0.35f,
             recoveryPerSecond = 0f
         }
@@ -195,7 +216,7 @@ public class NeedsManager : MonoBehaviour
         if (state == null)
             return false;
 
-        return state.currentValue < state.urgentThreshold;
+        return GetNeedUrgencyBand(state) <= NeedUrgencyBand.Urgent;
     }
 
     private NeedUrgencyBand GetNeedUrgencyBand(NeedState state)
@@ -204,17 +225,18 @@ public class NeedsManager : MonoBehaviour
             return NeedUrgencyBand.Stable;
 
         float value = Mathf.Clamp(state.currentValue, 0f, state.maxValue);
+        NeedBandThresholds thresholds = GetValidatedThresholds(state);
 
-        if (value <= 2f)
+        if (value <= thresholds.criticalThreshold)
             return NeedUrgencyBand.Critical;
 
-        if (value <= 5f)
+        if (value <= thresholds.urgentThreshold)
             return NeedUrgencyBand.Urgent;
 
-        if (value <= 7f)
+        if (value <= thresholds.lowThreshold)
             return NeedUrgencyBand.Low;
 
-        if (value <= 9f)
+        if (value <= thresholds.stableThreshold)
             return NeedUrgencyBand.Stable;
 
         return NeedUrgencyBand.Abundant;
@@ -281,7 +303,13 @@ public class NeedsManager : MonoBehaviour
             needType = needType,
             currentValue = 10f,
             maxValue = 10f,
-            urgentThreshold = 5f,
+            bandThresholds = new NeedBandThresholds
+            {
+                criticalThreshold = 2f,
+                urgentThreshold = 5f,
+                lowThreshold = 7f,
+                stableThreshold = 9f
+            },
             decayPerSecond = 1f,
             recoveryPerSecond = 0f
         });
@@ -301,9 +329,33 @@ public class NeedsManager : MonoBehaviour
             return;
 
         state.maxValue = Mathf.Max(0f, state.maxValue);
-        state.urgentThreshold = Mathf.Clamp(state.urgentThreshold, 0f, state.maxValue);
         state.currentValue = Mathf.Clamp(state.currentValue, 0f, state.maxValue);
         state.decayPerSecond = Mathf.Max(0f, state.decayPerSecond);
         state.recoveryPerSecond = Mathf.Max(0f, state.recoveryPerSecond);
+        ClampThresholds(state);
+    }
+
+    private void ClampThresholds(NeedState state)
+    {
+        if (state.bandThresholds == null)
+            state.bandThresholds = new NeedBandThresholds();
+
+        NeedBandThresholds thresholds = state.bandThresholds;
+
+        thresholds.criticalThreshold = Mathf.Clamp(thresholds.criticalThreshold, 0f, state.maxValue);
+        thresholds.urgentThreshold = Mathf.Clamp(thresholds.urgentThreshold, thresholds.criticalThreshold, state.maxValue);
+        thresholds.lowThreshold = Mathf.Clamp(thresholds.lowThreshold, thresholds.urgentThreshold, state.maxValue);
+        thresholds.stableThreshold = Mathf.Clamp(thresholds.stableThreshold, thresholds.lowThreshold, state.maxValue);
+    }
+
+    private NeedBandThresholds GetValidatedThresholds(NeedState state)
+    {
+        if (state.bandThresholds == null)
+        {
+            state.bandThresholds = new NeedBandThresholds();
+        }
+
+        ClampThresholds(state);
+        return state.bandThresholds;
     }
 }
