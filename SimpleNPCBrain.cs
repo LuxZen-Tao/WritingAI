@@ -6,11 +6,7 @@ public class SimpleNPCBrain : MonoBehaviour
 {
     public enum AIState
     {
-        Idle,
         IdleWander,
-        CheckNeed,
-        FindTarget,
-        Search,
         Explore,
         MoveToTarget,
         MoveToRememberedTarget,
@@ -18,7 +14,7 @@ public class SimpleNPCBrain : MonoBehaviour
     }
 
     [Header("State")]
-    public AIState currentState = AIState.Idle;
+    public AIState currentState = AIState.IdleWander;
 
     [Header("Movement Speeds")]
     public float idleMoveSpeed = 1f;
@@ -43,21 +39,17 @@ public class SimpleNPCBrain : MonoBehaviour
     public LayerMask obstacleLayer;
     public Transform eyePoint;
 
-    [Header("Search")]
-    public float searchTurnSpeed = 60f;
-    public float searchDuration = 2f;
-
     [Header("Explore")]
-    public float exploreRadius = 4f;
+    public float exploreRadius = 5f;
     public float exploreDuration = 3f;
     public float exploreStopDistance = 0.5f;
 
     [Header("Idle Wander")]
     public float idleWanderRadius = 3f;
-    public float idleWanderDuration = 4f;
     public float idleWanderStopDistance = 0.5f;
     public float idlePauseDuration = 2f;
-    public float minimumIdleMoveDistance = 1.0f;
+    public float minimumIdleMoveDistance = 1f;
+    public float roomPointInset = 0.5f;
 
     [Header("Memory - Interactables")]
     public List<RememberedInteractable> memory = new List<RememberedInteractable>();
@@ -72,10 +64,13 @@ public class SimpleNPCBrain : MonoBehaviour
     [Header("Current Target")]
     public Interactable currentTarget;
 
+    private readonly List<RoomArea> overlappingRooms = new List<RoomArea>();
+    private RoomArea[] knownRooms;
+
     private NavMeshAgent agent;
-    private float searchTimer = 0f;
+
     private float exploreTimer = 0f;
-    private float idleTimer = 0f;
+    private float idlePauseTimer = 0f;
 
     private Vector3 currentExplorePoint;
     private bool hasExplorePoint = false;
@@ -97,7 +92,8 @@ public class SimpleNPCBrain : MonoBehaviour
             return;
         }
 
-        ChangeState(AIState.CheckNeed);
+        knownRooms = FindObjectsByType<RoomArea>(FindObjectsSortMode.None);
+        ChangeState(AIState.IdleWander);
     }
 
     private void Update()
@@ -107,26 +103,24 @@ public class SimpleNPCBrain : MonoBehaviour
         CleanupInteractableMemory();
         PassiveObserveVisibleInteractables();
 
+        if (HasUrgentNeed())
+        {
+            if (currentState == AIState.IdleWander)
+            {
+                currentNeedType = NeedType.Comfort;
+                ChangeState(AIState.Explore);
+            }
+        }
+        else if (IsNeedDrivenState(currentState))
+        {
+            AbortCurrentNeedAction();
+            return;
+        }
+
         switch (currentState)
         {
-            case AIState.Idle:
-                HandleIdleState();
-                break;
-
             case AIState.IdleWander:
                 HandleIdleWander();
-                break;
-
-            case AIState.CheckNeed:
-                EvaluateNeeds();
-                break;
-
-            case AIState.FindTarget:
-                FindBestTargetForNeed(currentNeedType);
-                break;
-
-            case AIState.Search:
-                SearchForTarget();
                 break;
 
             case AIState.Explore:
@@ -162,26 +156,9 @@ public class SimpleNPCBrain : MonoBehaviour
         return false;
     }
 
-    private string GetCurrentAreaName()
-    {
-        if (currentRoom != null)
-        {
-            return currentRoom.roomName;
-        }
-
-        if (worldArea != null)
-        {
-            return worldArea.worldName;
-        }
-
-        return "Unknown Area";
-    }
-
     private void UpdateComfort()
     {
-        bool areaIsLit = IsCurrentAreaLit();
-
-        if (!areaIsLit)
+        if (!IsCurrentAreaLit())
         {
             comfort -= comfortDecayRate * Time.deltaTime;
         }
@@ -198,78 +175,31 @@ public class SimpleNPCBrain : MonoBehaviour
         return comfort < comfortThreshold;
     }
 
-    private void EvaluateNeeds()
+    private bool IsNeedDrivenState(AIState state)
     {
-        if (HasUrgentNeed())
-        {
-            currentNeedType = NeedType.Comfort;
-
-            if (currentRoom != null && currentRoom.IsLit())
-            {
-                ChangeState(AIState.Idle);
-                return;
-            }
-
-            Debug.Log("Comfort is low in " + GetCurrentAreaName() + ". Looking for something to improve comfort.");
-            ChangeState(AIState.FindTarget);
-        }
-        else
-        {
-            ChangeState(AIState.Idle);
-        }
-    }
-
-    private void HandleIdleState()
-    {
-        if (HasUrgentNeed())
-        {
-            currentNeedType = NeedType.Comfort;
-
-            if (currentRoom != null && currentRoom.IsLit())
-            {
-                // Need is recovering in a valid comfort zone, but can still wander locally
-            }
-            else
-            {
-                ChangeState(AIState.FindTarget);
-                return;
-            }
-        }
-
-        idleTimer += Time.deltaTime;
-
-        if (idleTimer >= idlePauseDuration)
-        {
-            idleTimer = 0f;
-            ChangeState(AIState.IdleWander);
-        }
+        return state == AIState.Explore ||
+               state == AIState.MoveToTarget ||
+               state == AIState.MoveToRememberedTarget ||
+               state == AIState.InteractWithTarget;
     }
 
     private void HandleIdleWander()
     {
         agent.speed = idleMoveSpeed;
 
-        if (HasUrgentNeed())
+        if (idlePauseTimer > 0f)
         {
-            currentNeedType = NeedType.Comfort;
-
-            if (!(currentRoom != null && currentRoom.IsLit()))
-            {
-                hasIdlePoint = false;
-                agent.ResetPath();
-                ChangeState(AIState.FindTarget);
-                return;
-            }
+            idlePauseTimer -= Time.deltaTime;
+            agent.ResetPath();
+            return;
         }
 
         if (!hasIdlePoint)
         {
-            bool foundPoint = TryPickIdlePoint();
-
-            if (!foundPoint)
+            if (!TryPickIdlePoint())
             {
+                idlePauseTimer = idlePauseDuration;
                 agent.ResetPath();
-                ChangeState(AIState.Idle);
                 return;
             }
         }
@@ -278,36 +208,283 @@ public class SimpleNPCBrain : MonoBehaviour
 
         if (!agent.pathPending && agent.remainingDistance <= idleWanderStopDistance)
         {
-            // No recent-location memory for idle wandering
             hasIdlePoint = false;
+            idlePauseTimer = idlePauseDuration;
             agent.ResetPath();
-            ChangeState(AIState.Idle);
-            return;
-        }
-
-        idleTimer += Time.deltaTime;
-
-        if (idleTimer >= idleWanderDuration)
-        {
-            // No recent-location memory for idle wandering
-            hasIdlePoint = false;
-            idleTimer = 0f;
-            agent.ResetPath();
-            ChangeState(AIState.Idle);
         }
     }
 
-    private void FindBestTargetForNeed(NeedType needType)
+    private void ExploreForTarget()
     {
-        if (TryAcquireVisibleTarget(needType))
+        if (TryAcquireVisibleTarget(currentNeedType))
             return;
 
-        if (TryUseRememberedTarget(needType))
+        if (TryUseRememberedTarget(currentNeedType))
             return;
 
-        Debug.Log("No visible or remembered target found for " + needType + ". Searching...");
-        searchTimer = 0f;
-        ChangeState(AIState.Search);
+        agent.speed = needMoveSpeed;
+        exploreTimer += Time.deltaTime;
+
+        if (!hasExplorePoint)
+        {
+            if (!TryPickExplorePoint())
+            {
+                // Could not find a better search point. Pause briefly and retry.
+                exploreTimer = 0f;
+                agent.ResetPath();
+                return;
+            }
+        }
+
+        agent.SetDestination(currentExplorePoint);
+
+        if (!agent.pathPending && agent.remainingDistance <= exploreStopDistance)
+        {
+            RememberLocation(currentExplorePoint);
+            hasExplorePoint = false;
+            exploreTimer = 0f;
+            agent.ResetPath();
+            return;
+        }
+
+        if (exploreTimer >= exploreDuration)
+        {
+            RememberLocation(currentExplorePoint);
+            hasExplorePoint = false;
+            exploreTimer = 0f;
+            agent.ResetPath();
+        }
+    }
+
+    private bool TryPickExplorePoint()
+    {
+        for (int i = 0; i < 16; i++)
+        {
+            Vector3 randomOffset = Random.insideUnitSphere * exploreRadius;
+            randomOffset.y = 0f;
+
+            Vector3 candidate = transform.position + randomOffset;
+
+            if (IsRecentlyVisited(candidate))
+                continue;
+
+            if (!NavMesh.SamplePosition(candidate, out NavMeshHit navHit, 2f, NavMesh.AllAreas))
+                continue;
+
+            if (IsRecentlyVisited(navHit.position))
+                continue;
+
+            if (!IsPathReachable(navHit.position))
+                continue;
+
+            currentExplorePoint = navHit.position;
+            hasExplorePoint = true;
+            exploreTimer = 0f;
+            return true;
+        }
+
+        return false;
+    }
+
+    private bool TryPickIdlePoint()
+    {
+        bool currentRoomLit = currentRoom != null && currentRoom.IsLit();
+        bool outsideLit = IsOutsideAreaLit();
+
+        // Rule 4: lit room + dark outside -> strictly clamp to current room.
+        if (currentRoomLit && !outsideLit)
+        {
+            return TryPickPointInsideRoom(currentRoom);
+        }
+
+        // Rule 1 and 3: prefer lit room and visible lit rooms.
+        List<RoomArea> comfortRooms = GetVisibleComfortRooms();
+
+        for (int i = 0; i < comfortRooms.Count; i++)
+        {
+            if (TryPickPointInsideRoom(comfortRooms[i]))
+            {
+                return true;
+            }
+        }
+
+        // Rule 2: lit room + lit outside means outside may be part of comfort zone.
+        if (currentRoomLit && outsideLit)
+        {
+            if (TryPickPointInOutsideComfortZone())
+            {
+                return true;
+            }
+        }
+
+        // Fallback: low-energy local wander even if no comfort room candidate was found.
+        return TryPickLocalIdlePoint();
+    }
+
+    private bool TryPickPointInsideRoom(RoomArea room)
+    {
+        if (room == null)
+            return false;
+
+        for (int i = 0; i < 12; i++)
+        {
+            if (!room.TryGetRandomPointInBounds(roomPointInset, out Vector3 candidate))
+                continue;
+
+            float distance = Vector3.Distance(transform.position, candidate);
+            if (distance < minimumIdleMoveDistance)
+                continue;
+
+            if (!NavMesh.SamplePosition(candidate, out NavMeshHit navHit, 2f, NavMesh.AllAreas))
+                continue;
+
+            if (!room.ContainsPoint(navHit.position))
+                continue;
+
+            if (!IsPathReachable(navHit.position))
+                continue;
+
+            currentIdlePoint = navHit.position;
+            hasIdlePoint = true;
+            return true;
+        }
+
+        return false;
+    }
+
+    private bool TryPickPointInOutsideComfortZone()
+    {
+        for (int i = 0; i < 12; i++)
+        {
+            Vector3 randomOffset = Random.insideUnitSphere * idleWanderRadius;
+            randomOffset.y = 0f;
+            Vector3 candidate = transform.position + randomOffset;
+
+            float distance = Vector3.Distance(transform.position, candidate);
+            if (distance < minimumIdleMoveDistance)
+                continue;
+
+            if (!NavMesh.SamplePosition(candidate, out NavMeshHit navHit, 2f, NavMesh.AllAreas))
+                continue;
+
+            if (currentRoom != null && currentRoom.ContainsPoint(navHit.position))
+                continue;
+
+            if (!IsPathReachable(navHit.position))
+                continue;
+
+            currentIdlePoint = navHit.position;
+            hasIdlePoint = true;
+            return true;
+        }
+
+        return false;
+    }
+
+    private bool TryPickLocalIdlePoint()
+    {
+        for (int i = 0; i < 10; i++)
+        {
+            Vector3 randomOffset = Random.insideUnitSphere * idleWanderRadius;
+            randomOffset.y = 0f;
+            Vector3 candidate = transform.position + randomOffset;
+
+            float distance = Vector3.Distance(transform.position, candidate);
+            if (distance < minimumIdleMoveDistance)
+                continue;
+
+            if (!NavMesh.SamplePosition(candidate, out NavMeshHit navHit, 2f, NavMesh.AllAreas))
+                continue;
+
+            if (!IsPathReachable(navHit.position))
+                continue;
+
+            currentIdlePoint = navHit.position;
+            hasIdlePoint = true;
+            return true;
+        }
+
+        return false;
+    }
+
+    private List<RoomArea> GetVisibleComfortRooms()
+    {
+        List<RoomArea> rooms = new List<RoomArea>();
+
+        if (currentRoom != null && currentRoom.IsLit())
+        {
+            rooms.Add(currentRoom);
+        }
+
+        if (knownRooms == null || knownRooms.Length == 0)
+        {
+            knownRooms = FindObjectsByType<RoomArea>(FindObjectsSortMode.None);
+        }
+
+        for (int i = 0; i < knownRooms.Length; i++)
+        {
+            RoomArea room = knownRooms[i];
+
+            if (room == null)
+                continue;
+
+            if (room == currentRoom)
+                continue;
+
+            if (!room.IsLit())
+                continue;
+
+            if (!CanSeePoint(room.transform.position))
+                continue;
+
+            rooms.Add(room);
+        }
+
+        return rooms;
+    }
+
+    private bool IsOutsideAreaLit()
+    {
+        if (currentRoom != null && currentRoom.worldArea != null)
+        {
+            return currentRoom.worldArea.IsDaytime();
+        }
+
+        return worldArea != null && worldArea.IsDaytime();
+    }
+
+    private bool IsPathReachable(Vector3 destination)
+    {
+        if (!agent.isOnNavMesh)
+            return false;
+
+        NavMeshPath path = new NavMeshPath();
+
+        if (!agent.CalculatePath(destination, path))
+            return false;
+
+        return path.status == NavMeshPathStatus.PathComplete;
+    }
+
+    private bool CanSeePoint(Vector3 targetPoint)
+    {
+        Vector3 origin = eyePoint != null ? eyePoint.position : transform.position + Vector3.up * 1.5f;
+        Vector3 directionToTarget = targetPoint - origin;
+        float distance = directionToTarget.magnitude;
+
+        if (distance > visionRange)
+            return false;
+
+        float angle = Vector3.Angle(transform.forward, directionToTarget);
+        if (angle > visionAngle * 0.5f)
+            return false;
+
+        if (Physics.Raycast(origin, directionToTarget.normalized, out RaycastHit hit, distance, obstacleLayer))
+        {
+            return false;
+        }
+
+        return true;
     }
 
     private void PassiveObserveVisibleInteractables()
@@ -318,17 +495,13 @@ public class SimpleNPCBrain : MonoBehaviour
         {
             Interactable interactable = hit.GetComponentInParent<Interactable>();
 
-            if (interactable == null)
-                continue;
-
-            if (!interactable.isEnabled)
+            if (interactable == null || !interactable.isEnabled)
                 continue;
 
             if (!CanSeeInteractable(interactable))
                 continue;
 
             INeedSatisfier satisfier = interactable as INeedSatisfier;
-
             if (satisfier == null)
                 continue;
 
@@ -347,21 +520,14 @@ public class SimpleNPCBrain : MonoBehaviour
         {
             Interactable interactable = hit.GetComponentInParent<Interactable>();
 
-            if (interactable == null)
-                continue;
-
-            if (!interactable.isEnabled)
+            if (interactable == null || !interactable.isEnabled)
                 continue;
 
             if (!CanSeeInteractable(interactable))
                 continue;
 
             INeedSatisfier satisfier = interactable as INeedSatisfier;
-
-            if (satisfier == null)
-                continue;
-
-            if (satisfier.GetNeedType() != needType)
+            if (satisfier == null || satisfier.GetNeedType() != needType)
                 continue;
 
             if (!interactable.CanInteract(gameObject))
@@ -370,7 +536,6 @@ public class SimpleNPCBrain : MonoBehaviour
             RememberInteractable(interactable, needType);
 
             float distance = Vector3.Distance(transform.position, interactable.GetInteractionPoint());
-
             if (distance < bestDistance)
             {
                 bestDistance = distance;
@@ -378,20 +543,17 @@ public class SimpleNPCBrain : MonoBehaviour
             }
         }
 
-        if (bestTarget != null)
-        {
-            currentTarget = bestTarget;
-            currentMemoryTarget = null;
-            hasExplorePoint = false;
-            hasIdlePoint = false;
-            agent.ResetPath();
+        if (bestTarget == null)
+            return false;
 
-            Debug.Log("Locked visible target: " + bestTarget.interactableName);
-            ChangeState(AIState.MoveToTarget);
-            return true;
-        }
+        currentTarget = bestTarget;
+        currentMemoryTarget = null;
+        hasExplorePoint = false;
+        hasIdlePoint = false;
+        agent.ResetPath();
 
-        return false;
+        ChangeState(AIState.MoveToTarget);
+        return true;
     }
 
     private bool TryUseRememberedTarget(NeedType needType)
@@ -403,23 +565,16 @@ public class SimpleNPCBrain : MonoBehaviour
 
         foreach (RememberedInteractable remembered in memory)
         {
-            if (remembered == null)
-                continue;
-
-            if (remembered.interactable == null)
+            if (remembered == null || remembered.interactable == null)
                 continue;
 
             if (remembered.needType != needType)
                 continue;
 
-            if (!remembered.interactable.isEnabled)
-                continue;
-
-            if (!remembered.interactable.CanInteract(gameObject))
+            if (!remembered.interactable.isEnabled || !remembered.interactable.CanInteract(gameObject))
                 continue;
 
             float distance = Vector3.Distance(transform.position, remembered.lastKnownPosition);
-
             if (distance < bestDistance)
             {
                 bestDistance = distance;
@@ -427,20 +582,146 @@ public class SimpleNPCBrain : MonoBehaviour
             }
         }
 
-        if (bestMemory != null)
-        {
-            currentMemoryTarget = bestMemory;
-            currentTarget = bestMemory.interactable;
-            hasExplorePoint = false;
-            hasIdlePoint = false;
-            agent.ResetPath();
+        if (bestMemory == null)
+            return false;
 
-            Debug.Log("Using remembered target: " + bestMemory.interactable.interactableName);
-            ChangeState(AIState.MoveToRememberedTarget);
-            return true;
+        currentMemoryTarget = bestMemory;
+        currentTarget = bestMemory.interactable;
+        hasExplorePoint = false;
+        hasIdlePoint = false;
+        agent.ResetPath();
+
+        ChangeState(AIState.MoveToRememberedTarget);
+        return true;
+    }
+
+    private void MoveToCurrentTarget()
+    {
+        if (!HasUrgentNeed())
+        {
+            AbortCurrentNeedAction();
+            return;
         }
 
-        return false;
+        if (currentTarget == null)
+        {
+            ChangeState(AIState.Explore);
+            return;
+        }
+
+        agent.speed = needMoveSpeed;
+        Vector3 targetPosition = currentTarget.GetInteractionPoint();
+        agent.SetDestination(targetPosition);
+
+        if (!agent.pathPending && agent.remainingDistance <= currentTarget.interactionRange)
+        {
+            ChangeState(AIState.InteractWithTarget);
+        }
+    }
+
+    private void MoveToRememberedTarget()
+    {
+        if (!HasUrgentNeed())
+        {
+            AbortCurrentNeedAction();
+            return;
+        }
+
+        if (currentMemoryTarget == null || currentMemoryTarget.interactable == null)
+        {
+            currentMemoryTarget = null;
+            currentTarget = null;
+            ChangeState(AIState.Explore);
+            return;
+        }
+
+        if (TryAcquireVisibleTarget(currentNeedType))
+            return;
+
+        agent.speed = needMoveSpeed;
+        agent.SetDestination(currentMemoryTarget.lastKnownPosition);
+
+        if (!agent.pathPending && agent.remainingDistance <= rememberedTargetStopDistance)
+        {
+            if (currentTarget != null && currentTarget.CanInteract(gameObject) && CanSeeInteractable(currentTarget))
+            {
+                ChangeState(AIState.MoveToTarget);
+                return;
+            }
+
+            memory.Remove(currentMemoryTarget);
+            currentMemoryTarget = null;
+            currentTarget = null;
+            ChangeState(AIState.Explore);
+        }
+    }
+
+    private void InteractWithCurrentTarget()
+    {
+        if (!HasUrgentNeed())
+        {
+            AbortCurrentNeedAction();
+            return;
+        }
+
+        if (currentTarget == null)
+        {
+            ChangeState(AIState.Explore);
+            return;
+        }
+
+        agent.ResetPath();
+
+        if (currentTarget.CanInteract(gameObject))
+        {
+            currentTarget.Interact(gameObject);
+        }
+
+        currentTarget = null;
+        currentMemoryTarget = null;
+        hasExplorePoint = false;
+        hasIdlePoint = false;
+
+        if (HasUrgentNeed())
+        {
+            ChangeState(AIState.Explore);
+        }
+        else
+        {
+            ChangeState(AIState.IdleWander);
+        }
+    }
+
+    private void AbortCurrentNeedAction()
+    {
+        currentTarget = null;
+        currentMemoryTarget = null;
+        hasExplorePoint = false;
+        hasIdlePoint = false;
+        agent.ResetPath();
+        ChangeState(AIState.IdleWander);
+    }
+
+    private void ChangeState(AIState newState)
+    {
+        if (currentState == newState)
+            return;
+
+        currentState = newState;
+        Debug.Log("State changed to: " + currentState);
+
+        switch (currentState)
+        {
+            case AIState.IdleWander:
+                hasIdlePoint = false;
+                idlePauseTimer = idlePauseDuration;
+                break;
+
+            case AIState.Explore:
+                hasExplorePoint = false;
+                exploreTimer = 0f;
+                break;
+        }
     }
 
     private void RememberInteractable(Interactable interactable, NeedType needType)
@@ -519,7 +800,6 @@ public class SimpleNPCBrain : MonoBehaviour
             return false;
 
         float angleToTarget = Vector3.Angle(transform.forward, directionToTarget);
-
         if (angleToTarget > visionAngle * 0.5f)
             return false;
 
@@ -529,306 +809,6 @@ public class SimpleNPCBrain : MonoBehaviour
         }
 
         return true;
-    }
-
-    private void SearchForTarget()
-    {
-        if (TryAcquireVisibleTarget(currentNeedType))
-            return;
-
-        searchTimer += Time.deltaTime;
-        transform.Rotate(0f, searchTurnSpeed * Time.deltaTime, 0f);
-
-        if (searchTimer >= searchDuration)
-        {
-            searchTimer = 0f;
-            ChangeState(AIState.Explore);
-        }
-    }
-
-    private void ExploreForTarget()
-    {
-        if (TryAcquireVisibleTarget(currentNeedType))
-            return;
-
-        agent.speed = needMoveSpeed;
-        exploreTimer += Time.deltaTime;
-
-        if (!hasExplorePoint)
-        {
-            bool foundPoint = TryPickExplorePoint();
-
-            if (!foundPoint)
-            {
-                Debug.Log("Could not find explore point. Returning to search.");
-                exploreTimer = 0f;
-                ChangeState(AIState.Search);
-                return;
-            }
-        }
-
-        agent.SetDestination(currentExplorePoint);
-
-        if (!agent.pathPending && agent.remainingDistance <= exploreStopDistance)
-        {
-            RememberLocation(currentExplorePoint);
-            exploreTimer = 0f;
-            hasExplorePoint = false;
-            agent.ResetPath();
-
-            if (TryAcquireVisibleTarget(currentNeedType))
-                return;
-
-            if (TryUseRememberedTarget(currentNeedType))
-                return;
-
-            ChangeState(AIState.FindTarget);
-            return;
-        }
-
-        if (exploreTimer >= exploreDuration)
-        {
-            RememberLocation(currentExplorePoint);
-            exploreTimer = 0f;
-            hasExplorePoint = false;
-            agent.ResetPath();
-
-            if (TryAcquireVisibleTarget(currentNeedType))
-                return;
-
-            if (TryUseRememberedTarget(currentNeedType))
-                return;
-
-            ChangeState(AIState.FindTarget);
-        }
-    }
-
-    private bool TryPickExplorePoint()
-    {
-        for (int i = 0; i < 12; i++)
-        {
-            Vector3 randomOffset = Random.insideUnitSphere * exploreRadius;
-            randomOffset.y = 0f;
-
-            Vector3 candidatePoint = transform.position + randomOffset;
-
-            if (IsRecentlyVisited(candidatePoint))
-                continue;
-
-            if (NavMesh.SamplePosition(candidatePoint, out NavMeshHit navHit, 2f, NavMesh.AllAreas))
-            {
-                if (IsRecentlyVisited(navHit.position))
-                    continue;
-
-                currentExplorePoint = navHit.position;
-                hasExplorePoint = true;
-                exploreTimer = 0f;
-
-                Debug.Log("New explore point chosen: " + currentExplorePoint);
-                return true;
-            }
-        }
-
-        return false;
-    }
-
-    private bool TryPickIdlePoint()
-    {
-        if (ShouldConstrainIdleToComfortRoom())
-        {
-            return TryPickIdlePointInsideCurrentRoom();
-        }
-
-        for (int i = 0; i < 10; i++)
-        {
-            Vector3 randomOffset = Random.insideUnitSphere * idleWanderRadius;
-            randomOffset.y = 0f;
-
-            Vector3 candidatePoint = transform.position + randomOffset;
-
-            float distanceFromCurrent = Vector3.Distance(transform.position, candidatePoint);
-            if (distanceFromCurrent < minimumIdleMoveDistance)
-                continue;
-
-            if (NavMesh.SamplePosition(candidatePoint, out NavMeshHit navHit, 2f, NavMesh.AllAreas))
-            {
-                currentIdlePoint = navHit.position;
-                hasIdlePoint = true;
-                idleTimer = 0f;
-                return true;
-            }
-        }
-
-        return false;
-    }
-
-    private bool TryPickIdlePointInsideCurrentRoom()
-    {
-        if (currentRoom == null)
-            return false;
-
-        for (int i = 0; i < 16; i++)
-        {
-            if (!currentRoom.TryGetRandomPointInBounds(randomPointMinDistance, out Vector3 candidatePoint))
-                continue;
-
-            if (NavMesh.SamplePosition(candidatePoint, out NavMeshHit navHit, 2f, NavMesh.AllAreas))
-            {
-                if (!currentRoom.ContainsPoint(navHit.position))
-                    continue;
-
-                currentIdlePoint = navHit.position;
-                hasIdlePoint = true;
-                idleTimer = 0f;
-                return true;
-            }
-        }
-
-        return false;
-    }
-
-    private void AbortCurrentNeedAction()
-    {
-        currentTarget = null;
-        currentMemoryTarget = null;
-        hasExplorePoint = false;
-        hasIdlePoint = false;
-        agent.ResetPath();
-
-        Debug.Log("Need no longer urgent. Aborting current target/action.");
-        ChangeState(AIState.Idle);
-    }
-
-    private void MoveToCurrentTarget()
-    {
-        if (!IsNeedUrgent(currentNeedType))
-        {
-            AbortCurrentNeedAction();
-            return;
-        }
-
-        if (currentTarget == null)
-        {
-            Debug.LogWarning("No target to move to.");
-            ChangeState(AIState.Idle);
-            return;
-        }
-
-        agent.speed = needMoveSpeed;
-
-        Vector3 targetPosition = currentTarget.GetInteractionPoint();
-        agent.SetDestination(targetPosition);
-
-        if (!agent.pathPending && agent.remainingDistance <= currentTarget.interactionRange)
-        {
-            if (!IsNeedUrgent(currentNeedType))
-            {
-                AbortCurrentNeedAction();
-                return;
-            }
-
-            ChangeState(AIState.InteractWithTarget);
-        }
-    }
-
-    private void MoveToRememberedTarget()
-    {
-        if (!IsNeedUrgent(currentNeedType))
-        {
-            AbortCurrentNeedAction();
-            return;
-        }
-
-        if (currentMemoryTarget == null || currentMemoryTarget.interactable == null)
-        {
-            Debug.Log("Remembered target is no longer valid.");
-            currentMemoryTarget = null;
-            currentTarget = null;
-            ChangeState(AIState.FindTarget);
-            return;
-        }
-
-        if (TryAcquireVisibleTarget(currentNeedType))
-            return;
-
-        agent.speed = needMoveSpeed;
-        agent.SetDestination(currentMemoryTarget.lastKnownPosition);
-
-        if (!agent.pathPending && agent.remainingDistance <= rememberedTargetStopDistance)
-        {
-            if (!IsNeedUrgent(currentNeedType))
-            {
-                AbortCurrentNeedAction();
-                return;
-            }
-
-            if (currentTarget != null && currentTarget.CanInteract(gameObject) && CanSeeInteractable(currentTarget))
-            {
-                ChangeState(AIState.MoveToTarget);
-                return;
-            }
-
-            memory.Remove(currentMemoryTarget);
-            currentMemoryTarget = null;
-            currentTarget = null;
-            ChangeState(AIState.FindTarget);
-        }
-    }
-
-    private void InteractWithCurrentTarget()
-    {
-        if (currentTarget == null)
-        {
-            Debug.LogWarning("No target to interact with.");
-            ChangeState(AIState.Idle);
-            return;
-        }
-
-        agent.ResetPath();
-
-        if (currentTarget.CanInteract(gameObject))
-        {
-            currentTarget.Interact(gameObject);
-        }
-
-        currentTarget = null;
-        currentMemoryTarget = null;
-        hasExplorePoint = false;
-        hasIdlePoint = false;
-        ChangeState(AIState.Idle);
-    }
-
-    private void ChangeState(AIState newState)
-    {
-        if (currentState == newState)
-            return;
-
-        currentState = newState;
-        Debug.Log("State changed to: " + currentState);
-
-        switch (currentState)
-        {
-            case AIState.Search:
-                searchTimer = 0f;
-                agent.ResetPath();
-                break;
-
-            case AIState.Explore:
-                exploreTimer = 0f;
-                hasExplorePoint = false;
-                break;
-
-            case AIState.Idle:
-                idleTimer = 0f;
-                hasIdlePoint = false;
-                agent.ResetPath();
-                break;
-
-            case AIState.IdleWander:
-                idleTimer = 0f;
-                hasIdlePoint = false;
-                break;
-        }
     }
 
     private void OnTriggerEnter(Collider other)
@@ -853,7 +833,6 @@ public class SimpleNPCBrain : MonoBehaviour
         if (room != null)
         {
             currentRoom = room;
-            Debug.Log(gameObject.name + " entered room: " + room.roomName);
         }
     }
 
@@ -893,6 +872,7 @@ public class SimpleNPCBrain : MonoBehaviour
                     containingDistanceSqr = distanceSqr;
                     containingRoom = room;
                 }
+
                 continue;
             }
 
@@ -904,41 +884,6 @@ public class SimpleNPCBrain : MonoBehaviour
         }
 
         currentRoom = containingRoom != null ? containingRoom : fallbackRoom;
-    }
-
-    private bool IsNeedUrgent(NeedType needType)
-    {
-        switch (needType)
-        {
-            case NeedType.Comfort:
-                return comfortNeedActive && !IsComfortSatisfiedByEnvironment();
-        }
-
-        return false;
-    }
-
-    private bool IsComfortSatisfiedByEnvironment()
-    {
-        RoomArea activeArea = GetActiveArea();
-        return activeArea != null && activeArea.IsLit();
-    }
-
-    private bool ShouldConstrainIdleToComfortRoom()
-    {
-        return currentRoom != null && currentRoom.IsLit();
-    }
-
-    private void ClearCurrentIntent(bool clearNavigation)
-    {
-        currentTarget = null;
-        currentMemoryTarget = null;
-        hasExplorePoint = false;
-        hasIdlePoint = false;
-
-        if (clearNavigation)
-        {
-            agent.ResetPath();
-        }
     }
 
     private void OnDrawGizmosSelected()
