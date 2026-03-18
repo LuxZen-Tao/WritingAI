@@ -4,6 +4,15 @@ using UnityEngine;
 
 public class NeedsManager : MonoBehaviour
 {
+    public enum NeedUrgencyBand
+    {
+        Critical,
+        Urgent,
+        Low,
+        Stable,
+        Abundant
+    }
+
     [Serializable]
     public class NeedState
     {
@@ -73,17 +82,26 @@ public class NeedsManager : MonoBehaviour
         for (int i = 0; i < needs.Count; i++)
         {
             NeedState state = needs[i];
-            if (state != null && state.currentValue < state.urgentThreshold)
+            if (state == null)
+                continue;
+
+            if (IsNeedUrgent(state))
                 return true;
         }
 
         return false;
     }
 
+    public bool HasUrgentNeed(out NeedType mostUrgentNeed)
+    {
+        mostUrgentNeed = GetMostUrgentNeed();
+        return IsNeedUrgent(mostUrgentNeed);
+    }
+
     public NeedType GetMostUrgentNeed()
     {
         NeedType bestNeed = NeedType.Comfort;
-        float bestUrgency = float.MinValue;
+        float bestScore = float.MinValue;
         bool foundUrgent = false;
 
         for (int i = 0; i < needs.Count; i++)
@@ -92,16 +110,15 @@ public class NeedsManager : MonoBehaviour
             if (state == null)
                 continue;
 
-            float urgency = GetUrgencyScore(state);
-            if (urgency <= 0f)
+            if (!IsNeedUrgent(state))
                 continue;
 
-            foundUrgent = true;
-
-            if (urgency > bestUrgency)
+            float score = GetNeedPriorityScore(state);
+            if (score > bestScore)
             {
-                bestUrgency = urgency;
+                bestScore = score;
                 bestNeed = state.needType;
+                foundUrgent = true;
             }
         }
 
@@ -111,10 +128,40 @@ public class NeedsManager : MonoBehaviour
     public bool IsNeedUrgent(NeedType needType)
     {
         NeedState state = GetState(needType);
-        if (state == null)
-            return false;
+        return IsNeedUrgent(state);
+    }
 
-        return state.currentValue < state.urgentThreshold;
+    public NeedUrgencyBand GetNeedUrgencyBand(NeedType needType)
+    {
+        NeedState state = GetState(needType);
+        return GetNeedUrgencyBand(state);
+    }
+
+    public float GetNeedPriorityScore(NeedType needType)
+    {
+        NeedState state = GetState(needType);
+        return GetNeedPriorityScore(state);
+    }
+
+    public float GetNeedMoveSpeedMultiplier(NeedType needType)
+    {
+        NeedUrgencyBand band = GetNeedUrgencyBand(needType);
+
+        switch (band)
+        {
+            case NeedUrgencyBand.Critical:
+                return 1.35f;
+            case NeedUrgencyBand.Urgent:
+                return 1.15f;
+            case NeedUrgencyBand.Low:
+                return 1f;
+            case NeedUrgencyBand.Stable:
+                return 0.9f;
+            case NeedUrgencyBand.Abundant:
+                return 0.8f;
+            default:
+                return 1f;
+        }
     }
 
     public void ModifyNeed(NeedType needType, float amount)
@@ -143,16 +190,71 @@ public class NeedsManager : MonoBehaviour
         return -state.decayPerSecond;
     }
 
-    private float GetUrgencyScore(NeedState state)
+    private bool IsNeedUrgent(NeedState state)
     {
-        if (state.urgentThreshold <= 0f)
-            return 0f;
+        if (state == null)
+            return false;
 
-        float missingFromThreshold = state.urgentThreshold - state.currentValue;
-        if (missingFromThreshold <= 0f)
-            return 0f;
+        return state.currentValue < state.urgentThreshold;
+    }
 
-        return missingFromThreshold / state.urgentThreshold;
+    private NeedUrgencyBand GetNeedUrgencyBand(NeedState state)
+    {
+        if (state == null)
+            return NeedUrgencyBand.Stable;
+
+        float value = Mathf.Clamp(state.currentValue, 0f, state.maxValue);
+
+        if (value <= 2f)
+            return NeedUrgencyBand.Critical;
+
+        if (value <= 5f)
+            return NeedUrgencyBand.Urgent;
+
+        if (value <= 7f)
+            return NeedUrgencyBand.Low;
+
+        if (value <= 9f)
+            return NeedUrgencyBand.Stable;
+
+        return NeedUrgencyBand.Abundant;
+    }
+
+    private float GetNeedPriorityScore(NeedState state)
+    {
+        if (state == null)
+            return float.MinValue;
+
+        NeedUrgencyBand band = GetNeedUrgencyBand(state);
+        float bandWeight = GetBandWeight(band);
+
+        if (bandWeight <= 0f)
+            return bandWeight;
+
+        float normalizedDeficit = state.maxValue > 0f
+            ? 1f - Mathf.Clamp01(state.currentValue / state.maxValue)
+            : 1f;
+
+        return bandWeight + normalizedDeficit;
+    }
+
+    private float GetBandWeight(NeedUrgencyBand band)
+    {
+        switch (band)
+        {
+            case NeedUrgencyBand.Critical:
+                return 3f;
+            case NeedUrgencyBand.Urgent:
+                return 2f;
+            case NeedUrgencyBand.Low:
+                return 1f;
+            case NeedUrgencyBand.Stable:
+                return 0f;
+            case NeedUrgencyBand.Abundant:
+                return -1f;
+            default:
+                return 0f;
+        }
     }
 
     private NeedState GetState(NeedType needType)
