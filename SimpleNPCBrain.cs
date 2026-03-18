@@ -708,6 +708,11 @@ public class SimpleNPCBrain : MonoBehaviour
 
     private bool TryPickIdlePoint()
     {
+        if (ShouldConstrainIdleToComfortRoom())
+        {
+            return TryPickIdlePointInsideCurrentRoom();
+        }
+
         for (int i = 0; i < 10; i++)
         {
             Vector3 randomOffset = Random.insideUnitSphere * idleWanderRadius;
@@ -724,6 +729,31 @@ public class SimpleNPCBrain : MonoBehaviour
             if (NavMesh.SamplePosition(candidatePoint, out NavMeshHit navHit, 2f, NavMesh.AllAreas))
             {
                 if (IsRecentlyVisited(navHit.position))
+                    continue;
+
+                currentIdlePoint = navHit.position;
+                hasIdlePoint = true;
+                idleTimer = 0f;
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private bool TryPickIdlePointInsideCurrentRoom()
+    {
+        if (currentRoom == null)
+            return false;
+
+        for (int i = 0; i < 16; i++)
+        {
+            if (!currentRoom.TryGetRandomPointInBounds(randomPointMinDistance, out Vector3 candidatePoint))
+                continue;
+
+            if (NavMesh.SamplePosition(candidatePoint, out NavMeshHit navHit, 2f, NavMesh.AllAreas))
+            {
+                if (!currentRoom.ContainsPoint(navHit.position))
                     continue;
 
                 currentIdlePoint = navHit.position;
@@ -919,7 +949,7 @@ public class SimpleNPCBrain : MonoBehaviour
 
     private void OnTriggerEnter(Collider other)
     {
-        RoomArea room = other.GetComponent<RoomArea>();
+        RoomArea room = other.GetComponentInParent<RoomArea>();
 
         if (room == null)
             return;
@@ -934,7 +964,7 @@ public class SimpleNPCBrain : MonoBehaviour
 
     private void OnTriggerExit(Collider other)
     {
-        RoomArea room = other.GetComponent<RoomArea>();
+        RoomArea room = other.GetComponentInParent<RoomArea>();
 
         if (room == null)
             return;
@@ -973,10 +1003,21 @@ public class SimpleNPCBrain : MonoBehaviour
         switch (needType)
         {
             case NeedType.Comfort:
-                return comfortNeedActive;
+                return comfortNeedActive && !IsComfortSatisfiedByEnvironment();
         }
 
         return false;
+    }
+
+    private bool IsComfortSatisfiedByEnvironment()
+    {
+        RoomArea activeArea = GetActiveArea();
+        return activeArea != null && activeArea.IsLit();
+    }
+
+    private bool ShouldConstrainIdleToComfortRoom()
+    {
+        return currentRoom != null && currentRoom.IsLit();
     }
 
     private void ClearCurrentIntent(bool clearNavigation)
