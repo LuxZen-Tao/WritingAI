@@ -1,4 +1,4 @@
-﻿using System.Collections.Generic;
+﻿﻿using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.AI;
 
@@ -69,10 +69,8 @@ public class SimpleNPCBrain : MonoBehaviour
     [Header("Current Target")]
     public Interactable currentTarget;
 
-    [Header("Thinking Logs")]
-    public bool enableThinkingLogs = true;
-    public bool includeThinkTimestamp = false;
-    public float repeatedThinkCooldown = 2.5f;
+    [Header("Thought Logging")]
+    [SerializeField] private NPCThoughtLogger thoughtLogger;
 
     private readonly List<RoomArea> overlappingRooms = new List<RoomArea>();
     private RoomArea[] knownRooms;
@@ -94,7 +92,6 @@ public class SimpleNPCBrain : MonoBehaviour
 
     private readonly Dictionary<NeedType, NeedsManager.NeedUrgencyBand> lastNeedBands = new Dictionary<NeedType, NeedsManager.NeedUrgencyBand>();
     private readonly Dictionary<NeedType, bool> lastNeedUrgentFlags = new Dictionary<NeedType, bool>();
-    private readonly Dictionary<string, float> thinkCooldowns = new Dictionary<string, float>();
 
     private void Start()
     {
@@ -120,12 +117,14 @@ public class SimpleNPCBrain : MonoBehaviour
         }
 
         knownRooms = FindObjectsByType<RoomArea>(FindObjectsSortMode.None);
+        EnsureThoughtLogger();
         CacheInitialNeedState();
 
         currentState = AIState.IdleWander;
         hasIdlePoint = false;
         idlePauseTimer = idlePauseDuration;
-        Think("Everything seems fine. I'll just wander for now.", "state-idle-start");
+
+        Narrate("Everything seems fine. I'll just wander for now.", "state-idle-start");
     }
 
     private void Update()
@@ -147,7 +146,7 @@ public class SimpleNPCBrain : MonoBehaviour
 
             if (needChanged && IsNeedDrivenState(currentState))
             {
-                Think(Pick(
+                Narrate(Pick(
                     "Something else is more urgent now. I need to switch priorities.",
                     "Hold on... another need just got worse. Changing course."
                 ), "need-switch-priority");
@@ -159,7 +158,7 @@ public class SimpleNPCBrain : MonoBehaviour
             {
                 if (IsNeedDrivenState(currentState))
                 {
-                    Think(Pick(
+                    Narrate(Pick(
                         "Okay, that's better.",
                         "Much better. I can ease off now."
                     ), "need-satisfied-in-action");
@@ -174,7 +173,7 @@ public class SimpleNPCBrain : MonoBehaviour
         }
         else if (IsNeedDrivenState(currentState))
         {
-            Think("I feel okay again. Back to wandering.", "return-to-idle-no-urgent");
+            Narrate("I feel okay again. Back to wandering.", "return-to-idle-no-urgent");
             AbortCurrentNeedAction();
             return;
         }
@@ -253,7 +252,7 @@ public class SimpleNPCBrain : MonoBehaviour
         {
             if (!TryPickIdlePoint())
             {
-                Think(Pick(
+                Narrate(Pick(
                     "I'll stay put for a moment.",
                     "Nothing better nearby. I'll wait here."
                 ), "idle-no-point");
@@ -266,7 +265,7 @@ public class SimpleNPCBrain : MonoBehaviour
                 return;
             }
 
-            Think(Pick(
+            Narrate(Pick(
                 "Just wandering...",
                 "Everything seems fine. I'll move around a bit.",
                 "I'll stay nearby for now."
@@ -289,7 +288,7 @@ public class SimpleNPCBrain : MonoBehaviour
     {
         if (IsNeedCurrentlySatisfied(currentNeedType))
         {
-            Think("Okay, that's better.", "explore-need-satisfied");
+            Narrate("Okay, that's better.", "explore-need-satisfied");
             AbortCurrentNeedAction();
             return;
         }
@@ -322,7 +321,7 @@ public class SimpleNPCBrain : MonoBehaviour
 
         if (!hasExplorePoint)
         {
-            Think(Pick(
+            Narrate(Pick(
                 "I need to find something...",
                 "I'll look around.",
                 "Nothing obvious yet. I'll keep searching."
@@ -330,7 +329,7 @@ public class SimpleNPCBrain : MonoBehaviour
 
             if (!TryPickExplorePoint())
             {
-                Think(Pick(
+                Narrate(Pick(
                     "Nothing useful here...",
                     "I can't find a good route."
                 ), "explore-failed-point");
@@ -340,7 +339,7 @@ public class SimpleNPCBrain : MonoBehaviour
                 return;
             }
 
-            Think("I'll check over there.", "explore-new-point");
+            Narrate("I'll check over there.", "explore-new-point");
         }
 
         agent.SetDestination(currentExplorePoint);
@@ -348,7 +347,7 @@ public class SimpleNPCBrain : MonoBehaviour
         if (!agent.pathPending && agent.remainingDistance <= exploreStopDistance)
         {
             RememberLocation(currentExplorePoint);
-            Think("Nothing useful here... moving on.", "explore-point-finished");
+            Narrate("Nothing useful here... moving on.", "explore-point-finished");
             hasExplorePoint = false;
             exploreTimer = 0f;
             agent.ResetPath();
@@ -358,7 +357,7 @@ public class SimpleNPCBrain : MonoBehaviour
         if (exploreTimer >= exploreDuration)
         {
             RememberLocation(currentExplorePoint);
-            Think("I've searched here long enough. Moving on.", "explore-point-abandon");
+            Narrate("I've searched here long enough. Moving on.", "explore-point-abandon");
             hasExplorePoint = false;
             exploreTimer = 0f;
             agent.ResetPath();
@@ -588,7 +587,7 @@ public class SimpleNPCBrain : MonoBehaviour
 
                 if (litChanged)
                 {
-                    Think(wasLit
+                    Narrate(wasLit
                         ? "That room looks lit now."
                         : "That room just got darker.",
                         "memory-comfort-update-" + room.GetInstanceID());
@@ -602,7 +601,7 @@ public class SimpleNPCBrain : MonoBehaviour
 
         if (wasLit)
         {
-            Think("That room looks lit. I'll remember it.", "memory-comfort-new-" + room.GetInstanceID());
+            Narrate("That room looks lit. I'll remember it.", "memory-comfort-new-" + room.GetInstanceID());
         }
     }
 
@@ -644,7 +643,7 @@ public class SimpleNPCBrain : MonoBehaviour
         Vector3 bestPoint = bestRoom.GetRoomCenterPoint();
         bool wasLit = bestRoom.IsLit();
 
-        Think("There's a lit area over there. That should help.", "perception-visible-comfort-target");
+        Narrate("There's a lit area over there. That should help.", "perception-visible-comfort-target");
 
         RememberComfortZone(bestRoom, bestPoint, wasLit);
         currentComfortZoneTarget = new RememberedComfortZone(bestRoom, bestPoint, Time.time, wasLit);
@@ -690,7 +689,7 @@ public class SimpleNPCBrain : MonoBehaviour
         if (bestZone == null)
             return false;
 
-        Think("I remember a lit place. I'll head there.", "recall-comfort-known-lit");
+        Narrate("I remember a lit place. I'll head there.", "recall-comfort-known-lit");
 
         currentComfortZoneTarget = bestZone;
         currentMemoryTarget = null;
@@ -728,7 +727,7 @@ public class SimpleNPCBrain : MonoBehaviour
         if (bestZone == null)
             return false;
 
-        Think("I've been near a place that might help. I'll try it again.", "recall-comfort-potential");
+        Narrate("I've been near a place that might help. I'll try it again.", "recall-comfort-potential");
 
         currentComfortZoneTarget = bestZone;
         currentMemoryTarget = null;
@@ -830,7 +829,7 @@ public class SimpleNPCBrain : MonoBehaviour
             if (!interactable.CanInteract(gameObject))
                 continue;
 
-            Think("I see something that could help.", "perception-visible-interactable");
+            Narrate("I see something that could help.", "perception-visible-interactable");
             RememberInteractable(interactable, needType);
 
             float distance = Vector3.Distance(transform.position, interactable.GetInteractionPoint());
@@ -844,7 +843,7 @@ public class SimpleNPCBrain : MonoBehaviour
         if (bestTarget == null)
             return false;
 
-        Think(Pick(
+        Narrate(Pick(
             "That's exactly what I need.",
             "Perfect. I'll go there.",
             "That should help."
@@ -890,7 +889,7 @@ public class SimpleNPCBrain : MonoBehaviour
         if (bestMemory == null)
             return false;
 
-        Think(Pick(
+        Narrate(Pick(
             "I remember something that could help.",
             "I've seen this before. Let me try that.",
             "Let me try that place again."
@@ -911,21 +910,21 @@ public class SimpleNPCBrain : MonoBehaviour
     {
         if (!HasUrgentNeed())
         {
-            Think("I don't need this anymore.", "move-target-no-urgent");
+            Narrate("I don't need this anymore.", "move-target-no-urgent");
             AbortCurrentNeedAction();
             return;
         }
 
         if (IsNeedCurrentlySatisfied(currentNeedType))
         {
-            Think("Already feeling better. I'll stop here.", "move-target-need-satisfied");
+            Narrate("Already feeling better. I'll stop here.", "move-target-need-satisfied");
             AbortCurrentNeedAction();
             return;
         }
 
         if (currentTarget == null)
         {
-            Think("I lost the target. I'll search again.", "move-target-lost");
+            Narrate("I lost the target. I'll search again.", "move-target-lost");
             ChangeState(AIState.Explore);
             return;
         }
@@ -944,14 +943,14 @@ public class SimpleNPCBrain : MonoBehaviour
     {
         if (!HasUrgentNeed())
         {
-            Think("I'm okay now. No need to keep chasing this.", "move-remembered-no-urgent");
+            Narrate("I'm okay now. No need to keep chasing this.", "move-remembered-no-urgent");
             AbortCurrentNeedAction();
             return;
         }
 
         if (IsNeedCurrentlySatisfied(currentNeedType))
         {
-            Think("That did the trick. I'll calm down.", "move-remembered-need-satisfied");
+            Narrate("That did the trick. I'll calm down.", "move-remembered-need-satisfied");
             AbortCurrentNeedAction();
             return;
         }
@@ -960,7 +959,7 @@ public class SimpleNPCBrain : MonoBehaviour
         {
             if (currentComfortZoneTarget.room == null)
             {
-                Think("That place is gone... I'll keep searching.", "move-remembered-comfort-missing-room");
+                Narrate("That place is gone... I'll keep searching.", "move-remembered-comfort-missing-room");
                 currentComfortZoneTarget = null;
                 ChangeState(AIState.Explore);
                 return;
@@ -973,12 +972,12 @@ public class SimpleNPCBrain : MonoBehaviour
             {
                 if (IsNeedCurrentlySatisfied(NeedType.Comfort))
                 {
-                    Think("Much better.", "move-remembered-comfort-solved");
+                    Narrate("Much better.", "move-remembered-comfort-solved");
                     AbortCurrentNeedAction();
                 }
                 else
                 {
-                    Think("Still not enough comfort here. I need another option.", "move-remembered-comfort-fallback");
+                    Narrate("Still not enough comfort here. I need another option.", "move-remembered-comfort-fallback");
                     currentComfortZoneTarget = null;
                     ChangeState(AIState.Explore);
                 }
@@ -989,7 +988,7 @@ public class SimpleNPCBrain : MonoBehaviour
 
         if (currentMemoryTarget == null || currentMemoryTarget.interactable == null)
         {
-            Think("That lead went cold. I'll look for something else.", "move-remembered-invalid");
+            Narrate("That lead went cold. I'll look for something else.", "move-remembered-invalid");
             currentMemoryTarget = null;
             currentTarget = null;
             ChangeState(AIState.Explore);
@@ -1006,12 +1005,12 @@ public class SimpleNPCBrain : MonoBehaviour
         {
             if (currentTarget != null && currentTarget.CanInteract(gameObject) && CanSeeInteractable(currentTarget))
             {
-                Think("There it is.", "move-remembered-found-target");
+                Narrate("There it is.", "move-remembered-found-target");
                 ChangeState(AIState.MoveToTarget);
                 return;
             }
 
-            Think("Nothing here... I need to try something else.", "move-remembered-not-found");
+            Narrate("Nothing here... I need to try something else.", "move-remembered-not-found");
             memory.Remove(currentMemoryTarget);
             currentMemoryTarget = null;
             currentTarget = null;
@@ -1023,14 +1022,14 @@ public class SimpleNPCBrain : MonoBehaviour
     {
         if (!HasUrgentNeed())
         {
-            Think("Never mind, I don't need this right now.", "interact-no-urgent");
+            Narrate("Never mind, I don't need this right now.", "interact-no-urgent");
             AbortCurrentNeedAction();
             return;
         }
 
         if (currentTarget == null)
         {
-            Think("No target to use... I'll search again.", "interact-missing-target");
+            Narrate("No target to use... I'll search again.", "interact-missing-target");
             ChangeState(AIState.Explore);
             return;
         }
@@ -1039,17 +1038,18 @@ public class SimpleNPCBrain : MonoBehaviour
 
         if (currentTarget.CanInteract(gameObject))
         {
-            Think(Pick(
+            Narrate(Pick(
                 "This should fix things.",
                 "Let's see...",
                 "Alright, this might help."
             ), "interact-attempt");
+
             currentTarget.Interact(gameObject);
-            Think("That worked.", "interact-complete");
+            Narrate("That worked.", "interact-complete");
         }
         else
         {
-            Think("That didn't work...", "interact-failed");
+            Narrate("That didn't work...", "interact-failed");
         }
 
         currentTarget = null;
@@ -1060,7 +1060,7 @@ public class SimpleNPCBrain : MonoBehaviour
 
         if (IsNeedCurrentlySatisfied(currentNeedType))
         {
-            Think(Pick(
+            Narrate(Pick(
                 "Much better.",
                 "That solved it.",
                 "I feel okay again."
@@ -1069,7 +1069,7 @@ public class SimpleNPCBrain : MonoBehaviour
         }
         else if (HasUrgentNeed())
         {
-            Think("Still need more. Keep looking.", "interact-still-urgent");
+            Narrate("Still need more. Keep looking.", "interact-still-urgent");
             ChangeState(AIState.Explore);
         }
         else
@@ -1130,7 +1130,7 @@ public class SimpleNPCBrain : MonoBehaviour
                 break;
         }
 
-        Think(GetStateTransitionThought(previousState, currentState), "state-change-" + previousState + "-" + currentState);
+        Narrate(GetStateTransitionThought(previousState, currentState), "state-change-" + previousState + "-" + currentState);
     }
 
     private void RememberInteractable(Interactable interactable, NeedType needType)
@@ -1145,7 +1145,7 @@ public class SimpleNPCBrain : MonoBehaviour
                 memory[i].lastKnownPosition = interactable.GetInteractionPoint();
                 memory[i].needType = needType;
                 memory[i].lastSeenTime = Time.time;
-                Think("I've seen this before.", "memory-update-interactable-" + interactable.GetInstanceID());
+                Narrate("I've seen this before.", "memory-update-interactable-" + interactable.GetInstanceID());
                 return;
             }
         }
@@ -1157,7 +1157,7 @@ public class SimpleNPCBrain : MonoBehaviour
             Time.time
         ));
 
-        Think("I'll remember this for later.", "memory-new-interactable-" + interactable.GetInstanceID());
+        Narrate("I'll remember this for later.", "memory-new-interactable-" + interactable.GetInstanceID());
     }
 
     private void ForgetInvalidMemories()
@@ -1346,6 +1346,19 @@ public class SimpleNPCBrain : MonoBehaviour
         }
     }
 
+    private void EnsureThoughtLogger()
+    {
+        if (thoughtLogger != null)
+            return;
+
+        thoughtLogger = GetComponent<NPCThoughtLogger>();
+
+        if (thoughtLogger == null)
+        {
+            thoughtLogger = gameObject.AddComponent<NPCThoughtLogger>();
+        }
+    }
+
     private void CacheInitialNeedState()
     {
         if (needsManager == null || needsManager.needs == null)
@@ -1388,7 +1401,7 @@ public class SimpleNPCBrain : MonoBehaviour
 
             if (currentBand != previousBand || isUrgent != hadUrgentFlag)
             {
-                Think(GetNeedShiftThought(needType, previousBand, currentBand, isUrgent), "need-band-" + needType + "-" + previousBand + "-" + currentBand);
+                Narrate(GetNeedShiftThought(needType, previousBand, currentBand, isUrgent), "need-band-" + needType + "-" + previousBand + "-" + currentBand);
             }
 
             lastNeedBands[needType] = currentBand;
@@ -1473,23 +1486,14 @@ public class SimpleNPCBrain : MonoBehaviour
         return options[Random.Range(0, options.Length)];
     }
 
-    private void Think(string message, string eventKey = null)
+    private void Narrate(
+        string message,
+        string eventKey = null,
+        NPCThoughtLogger.ThoughtCategory category = NPCThoughtLogger.ThoughtCategory.General)
     {
-        if (!enableThinkingLogs)
+        if (thoughtLogger == null || string.IsNullOrEmpty(message))
             return;
 
-        if (string.IsNullOrEmpty(message))
-            return;
-
-        string key = string.IsNullOrEmpty(eventKey) ? message : eventKey;
-        float now = Time.time;
-
-        if (thinkCooldowns.TryGetValue(key, out float nextAllowedTime) && now < nextAllowedTime)
-            return;
-
-        thinkCooldowns[key] = now + Mathf.Max(0f, repeatedThinkCooldown);
-
-        string actorName = string.IsNullOrWhiteSpace(gameObject.name) ? "NPC" : gameObject.name;
         NeedsManager.NeedUrgencyBand band = needsManager != null
             ? needsManager.GetNeedUrgencyBand(currentNeedType)
             : NeedsManager.NeedUrgencyBand.Stable;
@@ -1498,13 +1502,15 @@ public class SimpleNPCBrain : MonoBehaviour
             ? needsManager.GetNeedValue(currentNeedType)
             : 0f;
 
-        string header = "[" + actorName + " | " + currentState + " | " + currentNeedType + ": " + value.ToString("0.0") + " (" + band + ")]";
-
-        if (includeThinkTimestamp)
-        {
-            header = "[t=" + Time.time.ToString("0.0") + "] " + header;
-        }
-
-        Debug.Log(header + " " + message);
+        thoughtLogger.Think(
+            gameObject.name,
+            currentState.ToString(),
+            currentNeedType.ToString(),
+            value,
+            band.ToString(),
+            message,
+            eventKey,
+            category
+        );
     }
 }
