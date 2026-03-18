@@ -44,6 +44,16 @@ public class SimpleNPCBrain : MonoBehaviour
     public float exploreRecheckInterval = 0.75f;
     private float exploreRecheckTimer = 0f;
 
+    [Header("Movement Stall Detection")]
+    public float stallVelocityThreshold = 0.1f;
+    public float stallTimeThreshold = 0.75f;
+    private float stallTimer = 0f;
+
+    [Header("Door Probe")]
+    public float doorCheckDistance = 1.75f;
+    public LayerMask doorLayer;
+    public float doorInteractCooldown = 0.5f;
+
     [Header("Opportunistic Needs")]
     public float opportunisticTargetMaxDistance = 2.5f;
 
@@ -93,6 +103,7 @@ public class SimpleNPCBrain : MonoBehaviour
     private RememberedComfortZone currentComfortZoneTarget;
     private NeedType currentNeedType = NeedType.Comfort;
     private bool currentNeedActionIsUrgentDriven = false;
+    private float lastDoorInteractTime = -999f;
 
     private readonly Dictionary<NeedType, NeedsManager.NeedUrgencyBand> lastNeedBands = new Dictionary<NeedType, NeedsManager.NeedUrgencyBand>();
     private readonly Dictionary<NeedType, bool> lastNeedUrgentFlags = new Dictionary<NeedType, bool>();
@@ -246,6 +257,7 @@ public class SimpleNPCBrain : MonoBehaviour
 
     private void HandleIdleWander()
     {
+        ResetStallTimer();
         agent.speed = idleMoveSpeed;
 
         if (idlePauseTimer > 0f)
@@ -353,6 +365,19 @@ public class SimpleNPCBrain : MonoBehaviour
         }
 
         agent.SetDestination(currentExplorePoint);
+
+        if (IsStalled())
+        {
+            if (TryHandleBlockingDoor())
+                return;
+
+            RememberLocation(currentExplorePoint);
+            Narrate("I can't move through here. I'll try another route.", "explore-stalled-fallback");
+            hasExplorePoint = false;
+            exploreTimer = 0f;
+            agent.ResetPath();
+            return;
+        }
 
         if (!agent.pathPending && agent.remainingDistance <= exploreStopDistance)
         {
@@ -892,6 +917,16 @@ public class SimpleNPCBrain : MonoBehaviour
         Vector3 targetPosition = currentTarget.GetInteractionPoint();
         agent.SetDestination(targetPosition);
 
+        if (IsStalled())
+        {
+            if (TryHandleBlockingDoor())
+                return;
+
+            Narrate("Something is blocking this route. I'll search for another path.", "move-target-stalled-fallback");
+            HandleNeedActionFailure();
+            return;
+        }
+
         if (!agent.pathPending && agent.remainingDistance <= currentTarget.interactionRange)
         {
             ChangeState(AIState.InteractWithTarget);
@@ -927,6 +962,17 @@ public class SimpleNPCBrain : MonoBehaviour
             agent.speed = GetNeedMoveSpeed();
             agent.SetDestination(currentComfortZoneTarget.lastKnownPosition);
 
+            if (IsStalled())
+            {
+                if (TryHandleBlockingDoor())
+                    return;
+
+                Narrate("I can't reach that lit area from here. I'll find another option.", "move-remembered-comfort-stalled-fallback");
+                currentComfortZoneTarget = null;
+                HandleNeedActionFailure();
+                return;
+            }
+
             if (!agent.pathPending && agent.remainingDistance <= rememberedComfortZoneStopDistance)
             {
                 if (IsNeedCurrentlySatisfied(NeedType.Comfort))
@@ -960,6 +1006,18 @@ public class SimpleNPCBrain : MonoBehaviour
         agent.speed = GetNeedMoveSpeed();
         agent.SetDestination(currentMemoryTarget.lastKnownPosition);
 
+        if (IsStalled())
+        {
+            if (TryHandleBlockingDoor())
+                return;
+
+            Narrate("This route is blocked. I'll try a different lead.", "move-remembered-target-stalled-fallback");
+            currentMemoryTarget = null;
+            currentTarget = null;
+            HandleNeedActionFailure();
+            return;
+        }
+
         if (!agent.pathPending && agent.remainingDistance <= rememberedTargetStopDistance)
         {
             if (currentTarget != null && currentTarget.CanInteract(gameObject) && CanSeeInteractable(currentTarget))
@@ -979,6 +1037,8 @@ public class SimpleNPCBrain : MonoBehaviour
 
     private void InteractWithCurrentTarget()
     {
+        ResetStallTimer();
+
         if (currentNeedActionIsUrgentDriven && !HasUrgentNeed())
         {
             Narrate("Never mind, I don't need this right now.", "interact-no-urgent");
@@ -1039,6 +1099,7 @@ public class SimpleNPCBrain : MonoBehaviour
 
     private void AbortCurrentNeedAction()
     {
+        ResetStallTimer();
         currentTarget = null;
         currentMemoryTarget = null;
         currentComfortZoneTarget = null;
@@ -1051,6 +1112,7 @@ public class SimpleNPCBrain : MonoBehaviour
 
     private void RestartNeedSearch()
     {
+        ResetStallTimer();
         currentTarget = null;
         currentMemoryTarget = null;
         currentComfortZoneTarget = null;
@@ -1087,6 +1149,7 @@ public class SimpleNPCBrain : MonoBehaviour
 
         AIState previousState = currentState;
         currentState = newState;
+        ResetStallTimer();
 
         switch (currentState)
         {
@@ -1574,6 +1637,121 @@ public class SimpleNPCBrain : MonoBehaviour
         }
 
         return bestRoom != null;
+    }
+
+    private bool IsStalled()
+    {
+        if (agent == null || !agent.isOnNavMesh || agent.pathPending || !agent.hasPath)
+        {
+            stallTimer = 0f;
+            return false;
+        }
+
+        if (agent.remainingDistance <= agent.stoppingDistance + 0.05f)
+        {
+            stallTimer = 0f;
+            return false;
+        }
+
+        if (agent.velocity.sqrMagnitude < stallVelocityThreshold * stallVelocityThreshold)
+        {
+            stallTimer += Time.deltaTime;
+            return stallTimer >= stallTimeThreshold;
+        }
+
+        stallTimer = 0f;
+        return false;
+    }
+
+    private void ResetStallTimer()
+    {
+        stallTimer = 0f;
+    }
+
+    private bool TryGetDoorAhead(out DoorInteractable door)
+    {
+        door = null;
+
+        Vector3 origin = eyePoint != null ? eyePoint.position : transform.position + Vector3.up * 1.2f;
+        Vector3 movementDirection = agent != null && agent.desiredVelocity.sqrMagnitude > 0.001f
+            ? agent.desiredVelocity.normalized
+            : transform.forward;
+
+        int probeMask = doorLayer.value == 0 ? interactableLayer : doorLayer;
+
+        if (Physics.SphereCast(origin, 0.2f, movementDirection, out RaycastHit hit, doorCheckDistance, probeMask, QueryTriggerInteraction.Collide))
+        {
+            DoorInteractable hitDoor = hit.collider.GetComponentInParent<DoorInteractable>();
+            if (hitDoor != null)
+            {
+                Vector3 toDoor = (hitDoor.transform.position - transform.position).normalized;
+                if (Vector3.Dot(movementDirection, toDoor) >= 0.35f)
+                {
+                    door = hitDoor;
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    private bool TryHandleBlockingDoor()
+    {
+        if (!TryGetDoorAhead(out DoorInteractable door))
+            return false;
+
+        DoorController controller = door.GetDoorController();
+        if (controller == null)
+            return false;
+
+        if (controller.IsOpen)
+        {
+            agent.ResetPath();
+            RepathCurrentMovementDestination();
+            ResetStallTimer();
+            return true;
+        }
+
+        if (Time.time < lastDoorInteractTime + doorInteractCooldown)
+            return false;
+
+        if (!door.CanInteract(gameObject))
+            return false;
+
+        door.Interact(gameObject);
+        lastDoorInteractTime = Time.time;
+        agent.ResetPath();
+        RepathCurrentMovementDestination();
+        ResetStallTimer();
+        return true;
+    }
+
+    private void RepathCurrentMovementDestination()
+    {
+        switch (currentState)
+        {
+            case AIState.Explore:
+                if (hasExplorePoint)
+                    agent.SetDestination(currentExplorePoint);
+                break;
+
+            case AIState.MoveToTarget:
+                if (currentTarget != null)
+                    agent.SetDestination(currentTarget.GetInteractionPoint());
+                break;
+
+            case AIState.MoveToRememberedTarget:
+                if (currentComfortZoneTarget != null)
+                {
+                    agent.SetDestination(currentComfortZoneTarget.lastKnownPosition);
+                }
+                else if (currentMemoryTarget != null)
+                {
+                    agent.SetDestination(currentMemoryTarget.lastKnownPosition);
+                }
+                break;
+        }
     }
 
     private string Pick(params string[] options)

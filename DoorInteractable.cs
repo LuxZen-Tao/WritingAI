@@ -18,7 +18,7 @@ public class DoorInteractable : Interactable
         if (!base.CanInteract(interactor))
             return false;
 
-        return doorController != null;
+        return GetDoorController() != null;
     }
 
     public override void Interact(GameObject interactor)
@@ -26,6 +26,16 @@ public class DoorInteractable : Interactable
         if (!CanInteract(interactor))
             return;
 
-        doorController.Interact();
+        GetDoorController().Interact();
+    }
+
+    public DoorController GetDoorController()
+    {
+        if (doorController == null)
+        {
+            doorController = GetComponentInParent<DoorController>();
+        }
+
+        return doorController;
     }
 }
