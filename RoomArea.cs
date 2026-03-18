@@ -136,15 +136,6 @@ public class RoomArea : MonoBehaviour
         return false;
     }
 
-    public bool ContainsPoint(Vector3 worldPoint)
-    {
-        if (!TryGetRoomCollider(out Collider roomCollider))
-            return false;
-
-        Vector3 closestPoint = roomCollider.ClosestPoint(worldPoint);
-        return (closestPoint - worldPoint).sqrMagnitude <= 0.0001f;
-    }
-
     public bool TryGetRandomPointInBounds(float inset, out Vector3 worldPoint)
     {
         worldPoint = transform.position;

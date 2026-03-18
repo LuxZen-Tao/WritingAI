@@ -937,14 +937,8 @@ public class SimpleNPCBrain : MonoBehaviour
 
         if (clearNavigation)
         {
-            ResetNavigationTracking();
+            agent.ResetPath();
         }
-    }
-
-    private void AbortCurrentNeedAction()
-    {
-        ClearCurrentIntent(true);
-        ChangeState(AIState.Idle);
     }
 
     private void OnDrawGizmosSelected()
