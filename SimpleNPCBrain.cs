@@ -634,30 +634,12 @@ public class SimpleNPCBrain : MonoBehaviour
 
     private bool TryPickIdlePoint()
     {
-        // In a lit room, idle wandering is room-bounded and ignores recent-location memory
-        if (currentRoom != null && currentRoom.IsLit())
+        if (ShouldConstrainIdleToComfortRoom())
         {
-            for (int i = 0; i < 30; i++)
-            {
-                if (currentRoom.TryGetRandomNavigablePointInsideRoom(out Vector3 roomPoint))
-                {
-                    float distanceFromCurrent = Vector3.Distance(transform.position, roomPoint);
-
-                    if (distanceFromCurrent < minimumIdleMoveDistance)
-                        continue;
-
-                    currentIdlePoint = roomPoint;
-                    hasIdlePoint = true;
-                    idleTimer = 0f;
-                    return true;
-                }
-            }
-
-            return false;
+            return TryPickIdlePointInsideCurrentRoom();
         }
 
-        // Outside lit-room comfort zones, global idle wandering is allowed
-        for (int i = 0; i < 12; i++)
+        for (int i = 0; i < 10; i++)
         {
             Vector3 randomOffset = Random.insideUnitSphere * idleWanderRadius;
             randomOffset.y = 0f;
@@ -680,12 +662,26 @@ public class SimpleNPCBrain : MonoBehaviour
         return false;
     }
 
-    private bool IsNeedUrgent(NeedType needType)
+    private bool TryPickIdlePointInsideCurrentRoom()
     {
-        switch (needType)
+        if (currentRoom == null)
+            return false;
+
+        for (int i = 0; i < 16; i++)
         {
-            case NeedType.Comfort:
-                return comfort < comfortThreshold;
+            if (!currentRoom.TryGetRandomPointInBounds(randomPointMinDistance, out Vector3 candidatePoint))
+                continue;
+
+            if (NavMesh.SamplePosition(candidatePoint, out NavMeshHit navHit, 2f, NavMesh.AllAreas))
+            {
+                if (!currentRoom.ContainsPoint(navHit.position))
+                    continue;
+
+                currentIdlePoint = navHit.position;
+                hasIdlePoint = true;
+                idleTimer = 0f;
+                return true;
+            }
         }
 
         return false;
@@ -837,7 +833,22 @@ public class SimpleNPCBrain : MonoBehaviour
 
     private void OnTriggerEnter(Collider other)
     {
-        RoomArea room = other.GetComponent<RoomArea>();
+        RoomArea room = other.GetComponentInParent<RoomArea>();
+
+        if (room == null)
+            return;
+
+        if (!overlappingRooms.Contains(room))
+        {
+            overlappingRooms.Add(room);
+        }
+
+        ResolveCurrentRoom();
+    }
+
+    private void OnTriggerStay(Collider other)
+    {
+        RoomArea room = other.GetComponentInParent<RoomArea>();
 
         if (room != null)
         {
@@ -848,13 +859,92 @@ public class SimpleNPCBrain : MonoBehaviour
 
     private void OnTriggerExit(Collider other)
     {
-        RoomArea room = other.GetComponent<RoomArea>();
+        RoomArea room = other.GetComponentInParent<RoomArea>();
 
-        if (room != null && currentRoom == room)
+        if (room == null)
+            return;
+
+        overlappingRooms.Remove(room);
+        ResolveCurrentRoom();
+    }
+
+    private void ResolveCurrentRoom()
+    {
+        RoomArea containingRoom = null;
+        float containingDistanceSqr = Mathf.Infinity;
+        RoomArea fallbackRoom = null;
+        float fallbackDistanceSqr = Mathf.Infinity;
+
+        for (int i = overlappingRooms.Count - 1; i >= 0; i--)
         {
-            currentRoom = null;
-            Debug.Log(gameObject.name + " exited room: " + room.roomName);
+            RoomArea room = overlappingRooms[i];
+            if (room == null)
+            {
+                overlappingRooms.RemoveAt(i);
+                continue;
+            }
+
+            float distanceSqr = (room.transform.position - transform.position).sqrMagnitude;
+
+            if (room.ContainsPoint(transform.position))
+            {
+                if (distanceSqr < containingDistanceSqr)
+                {
+                    containingDistanceSqr = distanceSqr;
+                    containingRoom = room;
+                }
+                continue;
+            }
+
+            if (distanceSqr < fallbackDistanceSqr)
+            {
+                fallbackDistanceSqr = distanceSqr;
+                fallbackRoom = room;
+            }
         }
+
+        currentRoom = containingRoom != null ? containingRoom : fallbackRoom;
+    }
+
+    private bool IsNeedUrgent(NeedType needType)
+    {
+        switch (needType)
+        {
+            case NeedType.Comfort:
+                return comfortNeedActive && !IsComfortSatisfiedByEnvironment();
+        }
+
+        return false;
+    }
+
+    private bool IsComfortSatisfiedByEnvironment()
+    {
+        RoomArea activeArea = GetActiveArea();
+        return activeArea != null && activeArea.IsLit();
+    }
+
+    private bool ShouldConstrainIdleToComfortRoom()
+    {
+        return currentRoom != null && currentRoom.IsLit();
+    }
+
+    private void ClearCurrentIntent(bool clearNavigation)
+    {
+        currentTarget = null;
+        currentMemoryTarget = null;
+        hasExplorePoint = false;
+        hasIdlePoint = false;
+
+        if (clearNavigation)
+        {
+            ResetNavigationTracking();
+        }
+    }
+
+    private void AbortCurrentNeedAction()
+    {
+        ClearCurrentIntent(true);
+        ChangeState(AIState.Idle);
     }
 
     private void OnDrawGizmosSelected()

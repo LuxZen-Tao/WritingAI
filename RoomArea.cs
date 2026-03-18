@@ -17,6 +17,7 @@ public class RoomArea : MonoBehaviour
 
     [Header("Fallback")]
     public bool fallbackLitState = false;
+    private Collider cachedRoomCollider;
 
     private Collider roomCollider;
 
@@ -133,5 +134,77 @@ public class RoomArea : MonoBehaviour
         }
 
         return false;
+    }
+
+    public bool ContainsPoint(Vector3 worldPoint)
+    {
+        if (!TryGetRoomCollider(out Collider roomCollider))
+            return false;
+
+        Vector3 closestPoint = roomCollider.ClosestPoint(worldPoint);
+        return (closestPoint - worldPoint).sqrMagnitude <= 0.0001f;
+    }
+
+    public bool TryGetRandomPointInBounds(float inset, out Vector3 worldPoint)
+    {
+        worldPoint = transform.position;
+
+        if (!TryGetRoomBounds(out Bounds bounds))
+            return false;
+
+        float clampedInsetX = Mathf.Clamp(inset, 0f, bounds.extents.x * 0.95f);
+        float clampedInsetZ = Mathf.Clamp(inset, 0f, bounds.extents.z * 0.95f);
+
+        float minX = bounds.min.x + clampedInsetX;
+        float maxX = bounds.max.x - clampedInsetX;
+        float minZ = bounds.min.z + clampedInsetZ;
+        float maxZ = bounds.max.z - clampedInsetZ;
+
+        if (minX > maxX || minZ > maxZ)
+            return false;
+
+        for (int i = 0; i < 8; i++)
+        {
+            Vector3 candidate = new Vector3(
+                Random.Range(minX, maxX),
+                transform.position.y,
+                Random.Range(minZ, maxZ));
+
+            if (!ContainsPoint(candidate))
+                continue;
+
+            worldPoint = candidate;
+            return true;
+        }
+
+        return false;
+    }
+
+    private bool TryGetRoomBounds(out Bounds bounds)
+    {
+        if (!TryGetRoomCollider(out Collider roomCollider))
+        {
+            bounds = default;
+            return false;
+        }
+
+        bounds = roomCollider.bounds;
+        return true;
+    }
+
+    private bool TryGetRoomCollider(out Collider roomCollider)
+    {
+        if (cachedRoomCollider == null)
+        {
+            cachedRoomCollider = GetComponent<Collider>();
+
+            if (cachedRoomCollider == null)
+            {
+                cachedRoomCollider = GetComponentInChildren<Collider>();
+            }
+        }
+
+        roomCollider = cachedRoomCollider;
+        return roomCollider != null;
     }
 }
