@@ -127,9 +127,16 @@ public class SimpleNPCBrain : MonoBehaviour
         PassiveObserveVisibleInteractables();
         PassiveObserveVisibleComfortZones();
 
-        if (HasUrgentNeed())
+        if (needsManager.HasUrgentNeed(out NeedType mostUrgentNeed))
         {
-            currentNeedType = needsManager.GetMostUrgentNeed();
+            bool needChanged = mostUrgentNeed != currentNeedType;
+            currentNeedType = mostUrgentNeed;
+
+            if (needChanged && IsNeedDrivenState(currentState))
+            {
+                RestartNeedSearch();
+                return;
+            }
 
             if (IsNeedCurrentlySatisfied(currentNeedType))
             {
@@ -282,7 +289,7 @@ public class SimpleNPCBrain : MonoBehaviour
         }
 
         // 6. Broad explore
-        agent.speed = needMoveSpeed;
+        agent.speed = GetNeedMoveSpeed();
         exploreTimer += Time.deltaTime;
 
         if (!hasExplorePoint)
@@ -843,7 +850,7 @@ public class SimpleNPCBrain : MonoBehaviour
             return;
         }
 
-        agent.speed = needMoveSpeed;
+        agent.speed = GetNeedMoveSpeed();
         Vector3 targetPosition = currentTarget.GetInteractionPoint();
         agent.SetDestination(targetPosition);
 
@@ -877,7 +884,7 @@ public class SimpleNPCBrain : MonoBehaviour
                 return;
             }
 
-            agent.speed = needMoveSpeed;
+            agent.speed = GetNeedMoveSpeed();
             agent.SetDestination(currentComfortZoneTarget.lastKnownPosition);
 
             if (!agent.pathPending && agent.remainingDistance <= rememberedComfortZoneStopDistance)
@@ -908,7 +915,7 @@ public class SimpleNPCBrain : MonoBehaviour
         if (TryAcquireVisibleTarget(currentNeedType))
             return;
 
-        agent.speed = needMoveSpeed;
+        agent.speed = GetNeedMoveSpeed();
         agent.SetDestination(currentMemoryTarget.lastKnownPosition);
 
         if (!agent.pathPending && agent.remainingDistance <= rememberedTargetStopDistance)
@@ -976,6 +983,25 @@ public class SimpleNPCBrain : MonoBehaviour
         hasIdlePoint = false;
         agent.ResetPath();
         ChangeState(AIState.IdleWander);
+    }
+
+    private void RestartNeedSearch()
+    {
+        currentTarget = null;
+        currentMemoryTarget = null;
+        currentComfortZoneTarget = null;
+        hasExplorePoint = false;
+        hasIdlePoint = false;
+        agent.ResetPath();
+        ChangeState(AIState.Explore);
+    }
+
+    private float GetNeedMoveSpeed()
+    {
+        if (needsManager == null)
+            return needMoveSpeed;
+
+        return needMoveSpeed * needsManager.GetNeedMoveSpeedMultiplier(currentNeedType);
     }
 
     private void ChangeState(AIState newState)
