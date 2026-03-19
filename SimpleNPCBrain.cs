@@ -921,7 +921,7 @@ public class SimpleNPCBrain : MonoBehaviour
             // --- KEYS (important: must come BEFORE need satisfiers) ---
             if (interactable is IKeyItem && interactable is IPickupable pickupable && pickupable.CanPickUp(gameObject))
             {
-                RememberInteractable(interactable, NeedType.Comfort); // temp reuse
+                RememberObservedKey(interactable);
                 continue;
             }
 
@@ -931,6 +931,14 @@ public class SimpleNPCBrain : MonoBehaviour
                 RememberInteractable(interactable, satisfier.GetNeedType());
             }
         }
+    }
+
+    private void RememberObservedKey(Interactable keyInteractable)
+    {
+        if (keyInteractable == null)
+            return;
+
+        RememberInteractable(keyInteractable, NeedType.Key);
     }
 
     private bool TryAcquireVisibleTarget(NeedType needType, float maxDistance = Mathf.Infinity)
@@ -1049,13 +1057,12 @@ public class SimpleNPCBrain : MonoBehaviour
             if (TryHandleDoorForDestination(targetPosition))
                 return;
 
-            // If a locked door is blocking this path, actively seek the matching key.
             if (TryGetBlockingDoorTowards(targetPosition, out DoorInteractable stalledDoor))
             {
                 DoorController stalledController = stalledDoor?.GetDoorController();
                 if (stalledController != null && stalledController.IsLocked && !HasMatchingInventoryKey(stalledController))
                 {
-                    if (TryTargetMatchingKey(stalledController.RequiredKeyId))
+                    if (TryAcquireMatchingKeyForLockedDoor(stalledController.RequiredKeyId))
                         return;
                 }
             }
@@ -1108,13 +1115,12 @@ public class SimpleNPCBrain : MonoBehaviour
                 if (TryHandleDoorForDestination(currentComfortZoneTarget.lastKnownPosition))
                     return;
 
-                // If a locked door is blocking this path, actively seek the matching key.
                 if (TryGetBlockingDoorTowards(currentComfortZoneTarget.lastKnownPosition, out DoorInteractable stalledDoorCZ))
                 {
                     DoorController stalledControllerCZ = stalledDoorCZ?.GetDoorController();
                     if (stalledControllerCZ != null && stalledControllerCZ.IsLocked && !HasMatchingInventoryKey(stalledControllerCZ))
                     {
-                        if (TryTargetMatchingKey(stalledControllerCZ.RequiredKeyId))
+                        if (TryAcquireMatchingKeyForLockedDoor(stalledControllerCZ.RequiredKeyId))
                             return;
                     }
                 }
@@ -1163,13 +1169,12 @@ public class SimpleNPCBrain : MonoBehaviour
             if (TryHandleDoorForDestination(currentMemoryTarget.lastKnownPosition))
                 return;
 
-            // If a locked door is blocking this path, actively seek the matching key.
             if (TryGetBlockingDoorTowards(currentMemoryTarget.lastKnownPosition, out DoorInteractable stalledDoorMT))
             {
                 DoorController stalledControllerMT = stalledDoorMT?.GetDoorController();
                 if (stalledControllerMT != null && stalledControllerMT.IsLocked && !HasMatchingInventoryKey(stalledControllerMT))
                 {
-                    if (TryTargetMatchingKey(stalledControllerMT.RequiredKeyId))
+                    if (TryAcquireMatchingKeyForLockedDoor(stalledControllerMT.RequiredKeyId))
                         return;
                 }
             }
@@ -1562,95 +1567,6 @@ public class SimpleNPCBrain : MonoBehaviour
 
             if (DoorController.KeyIdsMatch(lockedDoorMemory.requiredKeyId, keyId))
                 return true;
-        }
-
-        return false;
-    }
-
-    // Actively searches for a key that matches requiredKeyId: first visible, then remembered.
-    // If found, assigns the key as currentTarget and transitions to the appropriate move state.
-    // Returns true if a matching key was targeted, false otherwise.
-    private bool TryTargetMatchingKey(string requiredKeyId)
-    {
-        if (string.IsNullOrWhiteSpace(requiredKeyId))
-            return false;
-
-        // --- 1. Search visible keys ---
-        Collider[] hits = Physics.OverlapSphere(transform.position, visionRange, interactableLayer);
-        Interactable bestVisible = null;
-        float bestVisibleDistance = Mathf.Infinity;
-
-        for (int i = 0; i < hits.Length; i++)
-        {
-            Interactable interactable = hits[i].GetComponentInParent<Interactable>();
-            if (interactable == null || !interactable.isEnabled)
-                continue;
-
-            IKeyItem keyItem = interactable as IKeyItem;
-            if (keyItem == null || !DoorController.KeyIdsMatch(keyItem.GetKeyId(), requiredKeyId))
-                continue;
-
-            IPickupable pickupable = interactable as IPickupable;
-            if (pickupable == null || !pickupable.CanPickUp(gameObject))
-                continue;
-
-            if (!CanSeeInteractable(interactable))
-                continue;
-
-            float dist = Vector3.Distance(transform.position, interactable.GetInteractionPoint());
-            if (dist < bestVisibleDistance)
-            {
-                bestVisibleDistance = dist;
-                bestVisible = interactable;
-            }
-        }
-
-        if (bestVisible != null)
-        {
-            currentTarget = bestVisible;
-            currentMemoryTarget = null;
-            currentComfortZoneTarget = null;
-            currentNeedActionIsUrgentDriven = false;
-            pendingDoorTarget = null;
-            hasPendingDoorDestination = false;
-            hasExplorePoint = false;
-            hasIdlePoint = false;
-            agent.ResetPath();
-            Narrate("I can see the key I need. Going to get it.", "key-retrieval-visible");
-            ChangeState(AIState.MoveToTarget);
-            return true;
-        }
-
-        // --- 2. Search remembered keys ---
-        for (int i = 0; i < memory.Count; i++)
-        {
-            RememberedInteractable remembered = memory[i];
-            if (remembered == null || remembered.interactable == null)
-                continue;
-
-            IKeyItem keyItem = remembered.interactable as IKeyItem;
-            if (keyItem == null || !DoorController.KeyIdsMatch(keyItem.GetKeyId(), requiredKeyId))
-                continue;
-
-            if (!remembered.interactable.isEnabled)
-                continue;
-
-            IPickupable pickupable = remembered.interactable as IPickupable;
-            if (pickupable == null || !pickupable.CanPickUp(gameObject))
-                continue;
-
-            currentTarget = remembered.interactable;
-            currentMemoryTarget = remembered;
-            currentComfortZoneTarget = null;
-            currentNeedActionIsUrgentDriven = false;
-            pendingDoorTarget = null;
-            hasPendingDoorDestination = false;
-            hasExplorePoint = false;
-            hasIdlePoint = false;
-            agent.ResetPath();
-            Narrate("I remember seeing a key that could open that door.", "key-retrieval-remembered");
-            ChangeState(AIState.MoveToRememberedTarget);
-            return true;
         }
 
         return false;
@@ -2690,13 +2606,13 @@ public class SimpleNPCBrain : MonoBehaviour
 
         if (TryFindBestVisibleMatchingKey(requiredKeyId, out Interactable visibleKey))
         {
-            RememberInteractable(visibleKey, NeedType.Comfort);
-            return CommitMatchingKeyTarget(visibleKey);
+            RememberObservedKey(visibleKey);
+            return CommitMatchingKeyTarget(visibleKey, null, true);
         }
 
         if (TryFindBestRememberedMatchingKey(requiredKeyId, out RememberedInteractable rememberedKey))
         {
-            return CommitMatchingKeyTarget(rememberedKey.interactable);
+            return CommitMatchingKeyTarget(rememberedKey.interactable, rememberedKey, false);
         }
 
         return false;
@@ -2773,28 +2689,43 @@ public class SimpleNPCBrain : MonoBehaviour
         return bestMemory != null;
     }
 
-    private bool CommitMatchingKeyTarget(Interactable keyTarget)
+    private bool CommitMatchingKeyTarget(Interactable keyTarget, RememberedInteractable rememberedKeyMemory, bool isVisibleKey)
     {
         pendingDoorTarget = null;
         hasPendingDoorDestination = false;
         currentExploreDoorRouteAttempts = 0;
 
         currentTarget = keyTarget;
-        currentMemoryTarget = null;
+        currentMemoryTarget = rememberedKeyMemory;
         currentComfortZoneTarget = null;
         hasExplorePoint = false;
         hasIdlePoint = false;
+        currentNeedActionIsUrgentDriven = false;
 
         agent.ResetPath();
 
-        Vector3 targetPosition = currentTarget.GetInteractionPoint();
-        if (IsPathReachable(targetPosition))
+        Vector3 targetPosition = rememberedKeyMemory != null
+            ? rememberedKeyMemory.lastKnownPosition
+            : currentTarget.GetInteractionPoint();
+
+        if (IsPathReachable(targetPosition) || TryHandleDoorForDestination(targetPosition))
         {
-            ChangeState(AIState.MoveToTarget);
+            if (isVisibleKey)
+            {
+                Narrate("I can see the key I need. Going to get it.", "key-retrieval-visible");
+                ChangeState(AIState.MoveToTarget);
+            }
+            else
+            {
+                Narrate("I remember seeing a key that could open that door.", "key-retrieval-remembered");
+                ChangeState(AIState.MoveToRememberedTarget);
+            }
+
             return true;
         }
 
         currentTarget = null;
+        currentMemoryTarget = null;
         return false;
     }
 
