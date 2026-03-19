@@ -139,6 +139,9 @@ public class SimpleNPCBrain : MonoBehaviour
     private bool hasPendingDoorDestination = false;
     private int currentExploreDoorRouteAttempts = 0;
     private RestInteractable currentRestInteractable;
+    private float currentRestSessionElapsed = 0f;
+    private float currentRestMinimumDuration = 0f;
+    private float currentRestMaximumDuration = 0f;
 
     private readonly Dictionary<NeedType, NeedsManager.NeedUrgencyBand> lastNeedBands = new Dictionary<NeedType, NeedsManager.NeedUrgencyBand>();
     private readonly Dictionary<NeedType, bool> lastNeedUrgentFlags = new Dictionary<NeedType, bool>();
@@ -945,12 +948,13 @@ public class SimpleNPCBrain : MonoBehaviour
         return true;
     }
 
-    private bool TryUseRememberedTarget(NeedType needType)
+    private bool TryUseRememberedTarget(NeedType needType, float maxDistance = Mathf.Infinity)
     {
         ForgetInvalidMemories();
 
         RememberedInteractable bestMemory = null;
         float bestDistance = Mathf.Infinity;
+        float bestScore = float.MinValue;
 
         foreach (RememberedInteractable remembered in memory)
         {
@@ -973,10 +977,19 @@ public class SimpleNPCBrain : MonoBehaviour
                 continue;
 
             float distance = Vector3.Distance(transform.position, remembered.lastKnownPosition);
-            if (distance < bestDistance)
+            if (distance > maxDistance)
+                continue;
+
+            RestInteractable restInteractable = remembered.interactable as RestInteractable;
+            float score = restInteractable != null
+                ? restInteractable.Desirability / (1f + distance)
+                : -distance;
+
+            if (score > bestScore || (Mathf.Approximately(score, bestScore) && distance < bestDistance))
             {
-                bestDistance = distance;
                 bestMemory = remembered;
+                bestDistance = distance;
+                bestScore = score;
             }
         }
 
@@ -1232,6 +1245,9 @@ public class SimpleNPCBrain : MonoBehaviour
                     if (restTarget.HasActiveSession(gameObject))
                     {
                         currentRestInteractable = restTarget;
+                        currentRestSessionElapsed = 0f;
+                        currentRestMinimumDuration = restTarget.MinimumRestDuration;
+                        currentRestMaximumDuration = restTarget.MaximumRestDuration;
                         Narrate("I'll rest here for a bit.", "rest-session-begin");
                         ChangeState(AIState.Resting);
                         return;
@@ -1354,19 +1370,32 @@ public class SimpleNPCBrain : MonoBehaviour
             return;
         }
 
+        currentRestSessionElapsed += Time.deltaTime;
+
         float recoveredThisTick = currentRestInteractable.RecoverForSeconds(gameObject, Time.deltaTime);
         if (recoveredThisTick > 0f)
         {
             needsManager.ModifyNeed(currentRestInteractable.GetNeedType(), recoveredThisTick);
         }
 
-        bool needRecoveredEnough = !needsManager.IsNeedUrgent(currentRestInteractable.GetNeedType());
+        NeedType restNeedType = currentRestInteractable.GetNeedType();
+        bool minimumDurationSatisfied = currentRestSessionElapsed >= currentRestMinimumDuration;
+        bool maximumDurationReached = currentRestMaximumDuration > 0f && currentRestSessionElapsed >= currentRestMaximumDuration;
+        bool needRecoveredEnough = currentNeedActionIsUrgentDriven
+            ? !needsManager.IsNeedUrgent(restNeedType)
+            : !needsManager.ShouldOpportunisticallySatisfy(restNeedType);
         bool sessionCapReached = currentRestInteractable.IsSessionExhausted();
 
-        if (!needRecoveredEnough && !sessionCapReached)
+        bool shouldExitRest = maximumDurationReached ||
+                              (minimumDurationSatisfied && needRecoveredEnough) ||
+                              (minimumDurationSatisfied && sessionCapReached);
+
+        if (!shouldExitRest)
             return;
 
-        if (needRecoveredEnough)
+        if (maximumDurationReached)
+            Narrate("That's enough rest for now. Time to move again.", "rest-complete-max-duration");
+        else if (needRecoveredEnough)
             Narrate("That rest helped. I can keep going.", "rest-complete-satisfied");
         else
             Narrate("I've gotten all I can from this spot.", "rest-complete-cap-reached");
@@ -1559,6 +1588,9 @@ public class SimpleNPCBrain : MonoBehaviour
 
         currentRestInteractable.EndRestSession(gameObject);
         currentRestInteractable = null;
+        currentRestSessionElapsed = 0f;
+        currentRestMinimumDuration = 0f;
+        currentRestMaximumDuration = 0f;
     }
 
     private float GetNeedMoveSpeed()
@@ -2087,14 +2119,17 @@ public class SimpleNPCBrain : MonoBehaviour
                 continue;
             }
 
-            if (!HasEasyVisibleOpportunity(needType))
+            bool hasVisibleOpportunity = HasEasyVisibleOpportunity(needType);
+            bool hasRememberedOpportunity = HasEasyRememberedOpportunity(needType, opportunisticTargetMaxDistance);
+
+            if (!hasVisibleOpportunity && !hasRememberedOpportunity)
             {
-                DebugFlow("Opportunistic check: rejected " + needType + " because no easy visible opportunity was found within range " + opportunisticTargetMaxDistance);
+                DebugFlow("Opportunistic check: rejected " + needType + " because no easy visible or remembered opportunity was found within range " + opportunisticTargetMaxDistance);
                 continue;
             }
 
             float score = needsManager.GetNeedPriorityScore(needType);
-            DebugFlow("Opportunistic check: " + needType + " has visible opportunity with priority score " + score);
+            DebugFlow("Opportunistic check: " + needType + " has opportunistic opportunity with priority score " + score);
 
             if (score <= bestScore)
             {
@@ -2153,6 +2188,13 @@ public class SimpleNPCBrain : MonoBehaviour
         {
             DebugFlow("Opportunistic action: visible target acquisition succeeded for need " + bestNeed);
             Narrate("Easy opportunity. I'll handle this quickly.", "opportunity-interactable");
+            return true;
+        }
+
+        if (TryUseRememberedTarget(bestNeed, opportunisticTargetMaxDistance))
+        {
+            DebugFlow("Opportunistic action: remembered target acquisition succeeded for need " + bestNeed);
+            Narrate("I remember a nearby spot that can help.", "opportunity-remembered-interactable");
             return true;
         }
 
@@ -2286,6 +2328,29 @@ public class SimpleNPCBrain : MonoBehaviour
         }
 
         return TryFindBestVisibleTarget(needType, opportunisticTargetMaxDistance, out _, out _);
+    }
+
+    private bool HasEasyRememberedOpportunity(NeedType needType, float maxDistance)
+    {
+        ForgetInvalidMemories();
+
+        for (int i = 0; i < memory.Count; i++)
+        {
+            RememberedInteractable remembered = memory[i];
+            if (remembered == null || remembered.interactable == null)
+                continue;
+
+            if (remembered.needType != needType)
+                continue;
+
+            if (!remembered.interactable.isEnabled || !remembered.interactable.CanInteract(gameObject))
+                continue;
+
+            if (Vector3.Distance(transform.position, remembered.lastKnownPosition) <= maxDistance)
+                return true;
+        }
+
+        return false;
     }
 
     private bool HasEasyVisibleComfortLightOpportunity()
@@ -2429,9 +2494,21 @@ public class SimpleNPCBrain : MonoBehaviour
                 continue;
             }
 
-            if (distance >= bestDistance)
+            RestInteractable restInteractable = interactable as RestInteractable;
+            float candidateScore = restInteractable != null
+                ? restInteractable.Desirability / (1f + distance)
+                : -distance;
+            float bestScore = bestTarget is RestInteractable bestRestInteractable
+                ? bestRestInteractable.Desirability / (1f + bestDistance)
+                : -bestDistance;
+
+            bool isBetterCandidate = bestTarget == null ||
+                                     candidateScore > bestScore ||
+                                     (Mathf.Approximately(candidateScore, bestScore) && distance < bestDistance);
+
+            if (!isBetterCandidate)
             {
-                DebugFlow($"[FindTarget] Rejected {interactable.name}: not closer than current best ({distance} >= {bestDistance})");
+                DebugFlow($"[FindTarget] Rejected {interactable.name}: lower desirability-distance score ({candidateScore} <= {bestScore})");
                 continue;
             }
 

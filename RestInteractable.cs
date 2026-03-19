@@ -8,6 +8,8 @@ public class RestInteractable : Interactable, INeedSatisfier
     [Header("Rest Session")]
     [SerializeField] protected float restRatePerSecond = 1.2f;
     [SerializeField] protected float maxRestPerSession = 4f;
+    [SerializeField] protected float minimumRestDuration = 1.5f;
+    [SerializeField] protected float maximumRestDuration = 0f;
     [SerializeField] protected float desirability = 1f;
 
     private float remainingSessionRecovery = 0f;
@@ -15,6 +17,8 @@ public class RestInteractable : Interactable, INeedSatisfier
 
     public float RestRatePerSecond => Mathf.Max(0f, restRatePerSecond);
     public float MaxRestPerSession => Mathf.Max(0f, maxRestPerSession);
+    public float MinimumRestDuration => Mathf.Max(0f, minimumRestDuration);
+    public float MaximumRestDuration => Mathf.Max(0f, maximumRestDuration);
     public float Desirability => Mathf.Max(0f, desirability);
     public float RemainingSessionRecovery => Mathf.Max(0f, remainingSessionRecovery);
 
