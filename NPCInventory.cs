@@ -122,4 +122,30 @@ public class NPCInventory : MonoBehaviour
 
         return best;
     }
+
+    public bool TryGetMatchingKey(string lockId, out IKeyItem matchingKey)
+    {
+        matchingKey = null;
+
+        if (string.IsNullOrWhiteSpace(lockId))
+            return false;
+
+        for (int i = 0; i < items.Count; i++)
+        {
+            if (items[i] == null)
+                continue;
+
+            IKeyItem keyItem = items[i] as IKeyItem;
+            if (keyItem == null)
+                continue;
+
+            if (!DoorController.KeyIdsMatch(lockId, keyItem.GetKeyId()))
+                continue;
+
+            matchingKey = keyItem;
+            return true;
+        }
+
+        return false;
+    }
 }

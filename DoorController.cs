@@ -8,6 +8,8 @@ public class DoorController : MonoBehaviour
 {
     [Header("Door State")]
     [SerializeField] private bool startsOpen = false;
+    [SerializeField] private bool startsLocked = false;
+    [SerializeField] private string requiredKeyId = "";
     [SerializeField] private bool toggleOnInteract = true;
 
     [Header("Transform Usage")]
@@ -38,9 +40,12 @@ public class DoorController : MonoBehaviour
 
 
     public bool IsOpen => isOpen;
+    public bool IsLocked => isLocked;
+    public string RequiredKeyId => requiredKeyId;
     public bool IsTransitioning => isTransitioning;
 
     private bool isOpen;
+    private bool isLocked;
     private bool isTransitioning;
 
     private Vector3 targetLocalPosition;
@@ -58,6 +63,7 @@ public class DoorController : MonoBehaviour
         }
 
         isOpen = startsOpen;
+        isLocked = startsLocked;
         SetTargets(isOpen);
         ApplyStateImmediate(isOpen);
         RefreshBlockingState();
@@ -97,6 +103,9 @@ public class DoorController : MonoBehaviour
 
     public void Interact()
     {
+        if (isLocked)
+            return;
+
         if (toggleOnInteract)
         {
             Toggle();
@@ -120,6 +129,34 @@ public class DoorController : MonoBehaviour
     public void Toggle()
     {
         SetOpenState(!isOpen);
+    }
+
+    public bool CanUnlockWithKeyId(string keyId)
+    {
+        if (!isLocked)
+            return true;
+
+        return KeyIdsMatch(requiredKeyId, keyId);
+    }
+
+    public bool TryUnlock(string keyId)
+    {
+        if (!isLocked)
+            return true;
+
+        if (!CanUnlockWithKeyId(keyId))
+            return false;
+
+        isLocked = false;
+        return true;
+    }
+
+    public static bool KeyIdsMatch(string requiredId, string offeredId)
+    {
+        if (string.IsNullOrWhiteSpace(requiredId) || string.IsNullOrWhiteSpace(offeredId))
+            return false;
+
+        return string.Equals(requiredId.Trim(), offeredId.Trim(), System.StringComparison.OrdinalIgnoreCase);
     }
 
     private void SetOpenState(bool newOpenState)
