@@ -918,6 +918,13 @@ public class SimpleNPCBrain : MonoBehaviour
             if (!CanSeeInteractable(interactable))
                 continue;
 
+            IKeyItem keyItem = interactable as IKeyItem;
+            if (keyItem != null)
+            {
+                RememberInteractable(interactable, NeedType.Comfort);
+                continue;
+            }
+
             INeedSatisfier satisfier = interactable as INeedSatisfier;
             if (satisfier != null)
             {
@@ -980,8 +987,7 @@ public class SimpleNPCBrain : MonoBehaviour
             if (remembered.needType != needType)
                 continue;
 
-            // Keys are only used via active key retrieval, not need-driven target resolution.
-            if (remembered.interactable is IKeyItem)
+            if (!(remembered.interactable is INeedSatisfier))
                 continue;
 
             if (!remembered.interactable.isEnabled || !remembered.interactable.CanInteract(gameObject))
@@ -2186,6 +2192,7 @@ public class SimpleNPCBrain : MonoBehaviour
     private bool TryAcquireOpportunisticPickupTarget(float maxDistance)
     {
         Collider[] hits = Physics.OverlapSphere(transform.position, visionRange, interactableLayer);
+        DebugFlow($"[PickupTarget] Start opportunistic pickup scan | hits={hits.Length} | maxDistance={maxDistance}");
 
         Interactable bestItem = null;
         float bestScore = float.MinValue;
@@ -2194,22 +2201,43 @@ public class SimpleNPCBrain : MonoBehaviour
         for (int i = 0; i < hits.Length; i++)
         {
             Interactable interactable = hits[i].GetComponentInParent<Interactable>();
-            if (interactable == null || !interactable.isEnabled)
+            if (interactable == null)
+            {
+                DebugFlow("[PickupTarget] Rejected collider: no Interactable in parent.");
                 continue;
+            }
+
+            if (!interactable.isEnabled)
+            {
+                DebugFlow($"[PickupTarget] Rejected {interactable.name}: isEnabled = false");
+                continue;
+            }
 
             if (!CanSeeInteractable(interactable))
+            {
+                DebugFlow($"[PickupTarget] Rejected {interactable.name}: cannot see interactable");
                 continue;
+            }
 
             IPickupable pickupable = interactable as IPickupable;
-            if (pickupable == null || !pickupable.CanPickUp(gameObject))
+            if (pickupable == null)
+            {
+                DebugFlow($"[PickupTarget] Rejected {interactable.name}: not IPickupable");
                 continue;
+            }
 
-            if (!interactable.CanInteract(gameObject))
+            if (!pickupable.CanPickUp(gameObject))
+            {
+                DebugFlow($"[PickupTarget] Rejected {interactable.name}: CanPickUp returned false");
                 continue;
+            }
 
             float distance = Vector3.Distance(transform.position, interactable.GetInteractionPoint());
             if (distance > maxDistance)
+            {
+                DebugFlow($"[PickupTarget] Rejected {interactable.name}: too far ({distance} > {maxDistance})");
                 continue;
+            }
 
             float score = pickupable.GetItemValue();
             IKeyItem keyItem = interactable as IKeyItem;
@@ -2228,13 +2256,17 @@ public class SimpleNPCBrain : MonoBehaviour
             if (Mathf.Approximately(score, bestScore) && distance >= bestDistance)
                 continue;
 
+            DebugFlow($"[PickupTarget] Candidate accepted: {interactable.name} | score={score} | distance={distance}");
             bestItem = interactable;
             bestScore = score;
             bestDistance = distance;
         }
 
         if (bestItem == null)
+        {
+            DebugFlow("[PickupTarget] FAILED: no eligible opportunistic pickup target found.");
             return false;
+        }
 
         currentTarget = bestItem;
         currentMemoryTarget = null;
@@ -2246,7 +2278,12 @@ public class SimpleNPCBrain : MonoBehaviour
 
         Vector3 targetPosition = currentTarget.GetInteractionPoint();
         if (!IsPathReachable(targetPosition) && !TryHandleDoorForDestination(targetPosition))
+        {
+            DebugFlow($"[PickupTarget] Selected {currentTarget.name} but destination is unreachable.");
             return false;
+        }
+
+        DebugFlow($"[PickupTarget] SUCCESS: selected {currentTarget.name} | score={bestScore} | distance={bestDistance}");
 
         if (bestItem is IKeyItem bestKeyItem &&
             IsKeyUsefulForRememberedLockedDoor(bestKeyItem) &&
@@ -2542,6 +2579,8 @@ public class SimpleNPCBrain : MonoBehaviour
         if (controller.IsLocked && !HasMatchingInventoryKey(controller))
         {
             RememberLockedDoor(door);
+            if (TryAcquireMatchingKeyForLockedDoor(controller.RequiredKeyId))
+                return true;
             return false;
         }
 
@@ -2564,71 +2603,72 @@ public class SimpleNPCBrain : MonoBehaviour
     }
 
     private bool HandlePendingDoorTarget()
+{
+    if (pendingDoorTarget == null)
+        return false;
+
+    DoorController controller = pendingDoorTarget.GetDoorController();
+    if (controller == null)
     {
-        if (pendingDoorTarget == null)
-            return false;
+        pendingDoorTarget = null;
+        hasPendingDoorDestination = false;
+        return false;
+    }
 
-        DoorController controller = pendingDoorTarget.GetDoorController();
-        if (controller == null)
-        {
-            pendingDoorTarget = null;
-            hasPendingDoorDestination = false;
-            return false;
-        }
+    if (controller.IsOpen)
+    {
+        pendingDoorTarget = null;
+        Vector3 repathDestination = hasPendingDoorDestination ? pendingDoorDestination : transform.position;
+        hasPendingDoorDestination = false;
+        agent.ResetPath();
+        agent.SetDestination(repathDestination);
+        ResetStallTimer();
+        return true;
+    }
 
-        if (controller.IsOpen)
-        {
-            pendingDoorTarget = null;
-            Vector3 repathDestination = hasPendingDoorDestination ? pendingDoorDestination : transform.position;
-            hasPendingDoorDestination = false;
-            agent.ResetPath();
-            agent.SetDestination(repathDestination);
-            ResetStallTimer();
+    Vector3 doorPoint = pendingDoorTarget.GetInteractionPoint();
+    agent.speed = GetActionMoveSpeed();
+    agent.SetDestination(doorPoint);
+
+    if (!agent.pathPending && agent.remainingDistance <= Mathf.Max(doorStopDistance, pendingDoorTarget.interactionRange))
+    {
+        if (Time.time < lastDoorInteractTime + doorInteractCooldown)
             return true;
+
+        if (!pendingDoorTarget.CanInteract(gameObject))
+        {
+            pendingDoorTarget = null;
+            hasPendingDoorDestination = false;
+            return false;
         }
 
-        Vector3 doorPoint = pendingDoorTarget.GetInteractionPoint();
-        agent.speed = GetActionMoveSpeed();
-        agent.SetDestination(doorPoint);
+        pendingDoorTarget.Interact(gameObject);
+        lastDoorInteractTime = Time.time;
 
-        if (!agent.pathPending && agent.remainingDistance <= Mathf.Max(doorStopDistance, pendingDoorTarget.interactionRange))
+        if (!controller.IsOpen && controller.IsLocked)
         {
-            if (Time.time < lastDoorInteractTime + doorInteractCooldown)
-                return true;
-
-            if (!pendingDoorTarget.CanInteract(gameObject))
+            if (TryUseInventoryKeyOnDoor(pendingDoorTarget))
             {
+                pendingDoorTarget.Interact(gameObject);
+            }
+            else
+            {
+                RememberLockedDoor(pendingDoorTarget);
+
+                if (TryAcquireMatchingKeyForLockedDoor(controller.RequiredKeyId))
+                    return true;
+
                 pendingDoorTarget = null;
                 hasPendingDoorDestination = false;
                 return false;
             }
-
-            pendingDoorTarget.Interact(gameObject);
-            lastDoorInteractTime = Time.time;
-
-            if (!controller.IsOpen && controller.IsLocked)
-            {
-                if (TryUseInventoryKeyOnDoor(pendingDoorTarget))
-                {
-                    pendingDoorTarget.Interact(gameObject);
-                }
-                else
-                {
-                    RememberLockedDoor(pendingDoorTarget);
-                    string requiredKeyId = controller.RequiredKeyId;
-                    pendingDoorTarget = null;
-                    hasPendingDoorDestination = false;
-                    if (TryTargetMatchingKey(requiredKeyId))
-                        return true;
-                    return false;
-                }
-            }
-
-            ResetStallTimer();
         }
 
-        return true;
+        ResetStallTimer();
     }
+
+    return true;
+}
 
     private void QueueDoorHandling(DoorInteractable door, Vector3 destination)
     {
@@ -2651,6 +2691,121 @@ public class SimpleNPCBrain : MonoBehaviour
             return false;
 
         return npcInventory.TryGetMatchingKey(controller.RequiredKeyId, out _);
+    }
+
+    private bool TryAcquireMatchingKeyForLockedDoor(string requiredKeyId)
+    {
+        if (string.IsNullOrWhiteSpace(requiredKeyId))
+            return false;
+
+        if (TryFindBestVisibleMatchingKey(requiredKeyId, out Interactable visibleKey))
+        {
+            RememberInteractable(visibleKey, NeedType.Comfort);
+            return CommitMatchingKeyTarget(visibleKey);
+        }
+
+        if (TryFindBestRememberedMatchingKey(requiredKeyId, out RememberedInteractable rememberedKey))
+        {
+            return CommitMatchingKeyTarget(rememberedKey.interactable);
+        }
+
+        return false;
+    }
+
+    private bool TryFindBestVisibleMatchingKey(string requiredKeyId, out Interactable bestKey)
+    {
+        Collider[] hits = Physics.OverlapSphere(transform.position, visionRange, interactableLayer);
+        bestKey = null;
+        float bestDistance = Mathf.Infinity;
+
+        for (int i = 0; i < hits.Length; i++)
+        {
+            Interactable interactable = hits[i].GetComponentInParent<Interactable>();
+            if (interactable == null || !interactable.isEnabled)
+                continue;
+
+            if (!CanSeeInteractable(interactable))
+                continue;
+
+            if (!(interactable is IKeyItem keyItem))
+                continue;
+
+            if (!DoorController.KeyIdsMatch(requiredKeyId, keyItem.GetKeyId()))
+                continue;
+
+            if (!(interactable is IPickupable pickupable) || !pickupable.CanPickUp(gameObject))
+                continue;
+
+            float distance = Vector3.Distance(transform.position, interactable.GetInteractionPoint());
+            if (distance >= bestDistance)
+                continue;
+
+            bestDistance = distance;
+            bestKey = interactable;
+        }
+
+        return bestKey != null;
+    }
+
+    private bool TryFindBestRememberedMatchingKey(string requiredKeyId, out RememberedInteractable bestMemory)
+    {
+        ForgetInvalidMemories();
+        bestMemory = null;
+        float bestDistance = Mathf.Infinity;
+
+        for (int i = 0; i < memory.Count; i++)
+        {
+            RememberedInteractable remembered = memory[i];
+            if (remembered == null || remembered.interactable == null)
+                continue;
+
+            Interactable interactable = remembered.interactable;
+            if (!interactable.isEnabled)
+                continue;
+
+            if (!(interactable is IKeyItem keyItem))
+                continue;
+
+            if (!DoorController.KeyIdsMatch(requiredKeyId, keyItem.GetKeyId()))
+                continue;
+
+            if (!(interactable is IPickupable pickupable) || !pickupable.CanPickUp(gameObject))
+                continue;
+
+            float distance = Vector3.Distance(transform.position, remembered.lastKnownPosition);
+            if (distance >= bestDistance)
+                continue;
+
+            bestDistance = distance;
+            bestMemory = remembered;
+        }
+
+        return bestMemory != null;
+    }
+
+    private bool CommitMatchingKeyTarget(Interactable keyTarget)
+    {
+        pendingDoorTarget = null;
+        hasPendingDoorDestination = false;
+        currentExploreDoorRouteAttempts = 0;
+
+        currentTarget = keyTarget;
+        currentMemoryTarget = null;
+        currentComfortZoneTarget = null;
+        hasExplorePoint = false;
+        hasIdlePoint = false;
+
+        agent.ResetPath();
+
+        Vector3 targetPosition = currentTarget.GetInteractionPoint();
+        if (IsPathReachable(targetPosition))
+        {
+            ChangeState(AIState.MoveToTarget);
+            return true;
+        }
+
+        currentTarget = null;
+        return false;
     }
 
     private void RepathCurrentMovementDestination()
