@@ -2089,7 +2089,9 @@ public class SimpleNPCBrain : MonoBehaviour
 
     private void MarkHandItemDrawnForUse()
     {
-        handItemReadyToUseTime = Time.time + Mathf.Max(0f, handPreUseHoldDuration);
+        float drawDelay = Mathf.Max(0f, handDrawReadableDelay);
+        float preUseDelay = Mathf.Max(0f, handPreUseHoldDuration);
+        handItemReadyToUseTime = Time.time + Mathf.Max(drawDelay, preUseDelay);
     }
 
     private bool IsHandItemReadyToUse()
@@ -2951,9 +2953,6 @@ public class SimpleNPCBrain : MonoBehaviour
 
     if (!agent.pathPending && agent.remainingDistance <= Mathf.Max(doorStopDistance, pendingDoorTarget.interactionRange))
     {
-        if (Time.time < lastDoorInteractTime + doorInteractCooldown)
-            return true;
-
         if (!pendingDoorTarget.CanInteract(gameObject))
         {
             pendingDoorTarget = null;
@@ -2961,22 +2960,16 @@ public class SimpleNPCBrain : MonoBehaviour
             return false;
         }
 
-        pendingDoorTarget.Interact(gameObject);
-        lastDoorInteractTime = Time.time;
-
         if (!controller.IsOpen && controller.IsLocked)
         {
             DoorUnlockAttempt unlockAttempt = TryUseInventoryKeyOnDoor(pendingDoorTarget);
 
-            if (unlockAttempt == DoorUnlockAttempt.Unlocked)
-            {
-                pendingDoorTarget.Interact(gameObject);
-            }
-            else if (unlockAttempt == DoorUnlockAttempt.WaitingForHandReady)
+            if (unlockAttempt == DoorUnlockAttempt.WaitingForHandReady)
             {
                 return true;
             }
-            else
+
+            if (unlockAttempt == DoorUnlockAttempt.Failed)
             {
                 RememberLockedDoor(pendingDoorTarget);
 
@@ -2988,6 +2981,12 @@ public class SimpleNPCBrain : MonoBehaviour
                 return false;
             }
         }
+
+        if (Time.time < lastDoorInteractTime + doorInteractCooldown)
+            return true;
+
+        pendingDoorTarget.Interact(gameObject);
+        lastDoorInteractTime = Time.time;
 
         ResetStallTimer();
     }
