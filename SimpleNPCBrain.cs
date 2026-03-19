@@ -119,8 +119,7 @@ public class SimpleNPCBrain : MonoBehaviour
     public NPCInventory npcInventory;
 
     [Header("Hand Item Presentation")]
-    [SerializeField] private float handPreUseHoldDuration = 0.5f;
-    [SerializeField] private float handDrawReadableDelay = 0.2f;
+    [SerializeField] private float minimumHandUseDelay = 1.0f;
     [SerializeField] private float handPostUseVisibleDelay = 0.4f;
     [SerializeField] private float idleHandPocketDelay = 1.5f;
 
@@ -177,6 +176,7 @@ public class SimpleNPCBrain : MonoBehaviour
     private float invariantCheckTimer = 0f;
     private float lastInvariantWarningTime = -999f;
     private float handItemReadyToUseTime = 0f;
+    private Interactable activePreparedHandUseItem;
     private Interactable trackedHandItem;
     private float trackedHandItemSinceTime = 0f;
     private Interactable pendingPostUsePocketItem;
@@ -1515,7 +1515,7 @@ public class SimpleNPCBrain : MonoBehaviour
         // If correct item is already in hand, wait until ready.
         if (handSatisfier != null && handSatisfier.GetNeedType() == needType)
         {
-            if (!IsHandItemReadyToUse())
+            if (!IsPreparedHandItemReady(handItem))
                 return InventoryUseAttempt.WaitingForHandReady;
 
             if (!handItem.CanInteract(gameObject))
@@ -1544,7 +1544,7 @@ public class SimpleNPCBrain : MonoBehaviour
 
         // Safety: now it should be in hand and ready.
         Interactable preparedHandItem = npcInventory.GetHandItem();
-        if (preparedHandItem == null || !preparedHandItem.CanInteract(gameObject))
+        if (!IsPreparedHandItemReady(preparedHandItem) || !preparedHandItem.CanInteract(gameObject))
             return InventoryUseAttempt.None;
 
         preparedHandItem.Interact(gameObject);
@@ -1968,7 +1968,7 @@ public class SimpleNPCBrain : MonoBehaviour
         Interactable keyInteractable = key as Interactable;
         if (keyInteractable != null && !TryPrepareItemInHand(keyInteractable))
         {
-            if (npcInventory.GetHandItem() == keyInteractable && !IsHandItemReadyToUse())
+            if (npcInventory.GetHandItem() == keyInteractable && !IsPreparedHandItemReady(keyInteractable))
                 return DoorUnlockAttempt.WaitingForHandReady;
 
             return DoorUnlockAttempt.Failed;
@@ -1996,7 +1996,12 @@ public class SimpleNPCBrain : MonoBehaviour
 
         // Already holding the correct item: only usable once delay has passed.
         if (npcInventory.GetHandItem() == desiredItem)
-            return IsHandItemReadyToUse();
+        {
+            if (activePreparedHandUseItem != desiredItem)
+                MarkHandItemDrawnForUse(desiredItem);
+
+            return IsPreparedHandItemReady(desiredItem);
+        }
 
         // Still in a blocked/transition window.
         if (!IsHandItemReadyToUse())
@@ -2013,7 +2018,7 @@ public class SimpleNPCBrain : MonoBehaviour
             return false;
 
         // Important: after moving it into hand, do NOT allow instant use.
-        MarkHandItemDrawnForUse();
+        MarkHandItemDrawnForUse(desiredItem);
         CancelPendingPostUsePocketing(desiredItem);
         return false;
     }
@@ -2028,6 +2033,8 @@ public class SimpleNPCBrain : MonoBehaviour
         {
             trackedHandItem = currentHandItem;
             trackedHandItemSinceTime = Time.time;
+            if (currentHandItem != activePreparedHandUseItem)
+                activePreparedHandUseItem = null;
         }
 
         ProcessPendingPostUsePocketing(currentHandItem);
@@ -2062,6 +2069,7 @@ public class SimpleNPCBrain : MonoBehaviour
         pendingPostUsePocketItem = usedItem;
         pendingPostUsePocketTime = Time.time + holdDuration;
         handItemReadyToUseTime = Mathf.Max(handItemReadyToUseTime, pendingPostUsePocketTime);
+        activePreparedHandUseItem = null;
     }
 
     private void ProcessPendingPostUsePocketing(Interactable currentHandItem)
@@ -2084,6 +2092,7 @@ public class SimpleNPCBrain : MonoBehaviour
         {
             pendingPostUsePocketItem = null;
             pendingPostUsePocketTime = -1f;
+            activePreparedHandUseItem = null;
         }
     }
 
@@ -2099,11 +2108,24 @@ public class SimpleNPCBrain : MonoBehaviour
         pendingPostUsePocketTime = -1f;
     }
 
-    private void MarkHandItemDrawnForUse()
+    private void MarkHandItemDrawnForUse(Interactable item)
     {
-        float drawDelay = Mathf.Max(0f, handDrawReadableDelay);
-        float preUseDelay = Mathf.Max(0f, handPreUseHoldDuration);
-        handItemReadyToUseTime = Time.time + Mathf.Max(drawDelay, preUseDelay);
+        activePreparedHandUseItem = item;
+        handItemReadyToUseTime = Time.time + Mathf.Max(1f, minimumHandUseDelay);
+    }
+
+    private bool IsPreparedHandItemReady(Interactable item)
+    {
+        if (item == null || npcInventory == null)
+            return false;
+
+        if (npcInventory.GetHandItem() != item)
+            return false;
+
+        if (activePreparedHandUseItem != item)
+            return false;
+
+        return IsHandItemReadyToUse();
     }
 
     private bool IsHandItemReadyToUse()
