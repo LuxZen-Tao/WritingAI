@@ -1,4 +1,4 @@
-﻿﻿using System.Collections.Generic;
+﻿using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.AI;
 
@@ -90,6 +90,9 @@ public class SimpleNPCBrain : MonoBehaviour
     [Header("Thought Logging")]
     [SerializeField] private NPCThoughtLogger thoughtLogger;
 
+    [Header("Debug")]
+    [SerializeField] private bool debugOpportunisticFlow = true;
+
     private readonly List<RoomArea> overlappingRooms = new List<RoomArea>();
     private RoomArea[] knownRooms;
 
@@ -174,7 +177,7 @@ public class SimpleNPCBrain : MonoBehaviour
             currentNeedType = mostUrgentNeed;
             currentNeedActionIsUrgentDriven = true;
 
-            if (needChanged && IsNeedDrivenState(currentState))
+            if (needChanged && IsGoalExecutionState(currentState))
             {
                 Narrate(Pick(
                     "Something else is more urgent now. I need to switch priorities.",
@@ -184,9 +187,9 @@ public class SimpleNPCBrain : MonoBehaviour
                 return;
             }
 
-            if (IsNeedCurrentlySatisfied(currentNeedType))
+            if (currentNeedActionIsUrgentDriven && IsNeedCurrentlySatisfied(currentNeedType))
             {
-                if (IsNeedDrivenState(currentState))
+                if (IsGoalExecutionState(currentState))
                 {
                     Narrate(Pick(
                         "Okay, that's better.",
@@ -201,7 +204,7 @@ public class SimpleNPCBrain : MonoBehaviour
                 ChangeState(AIState.Explore);
             }
         }
-        else if (IsNeedDrivenState(currentState))
+        else if (currentNeedActionIsUrgentDriven && IsGoalExecutionState(currentState))
         {
             Narrate("I feel okay again. Back to wandering.", "return-to-idle-no-urgent");
             AbortCurrentNeedAction();
@@ -261,12 +264,17 @@ public class SimpleNPCBrain : MonoBehaviour
         return needsManager != null && needsManager.HasUrgentNeed();
     }
 
-    private bool IsNeedDrivenState(AIState state)
+    private bool IsGoalExecutionState(AIState state)
     {
         return state == AIState.Explore ||
                state == AIState.MoveToTarget ||
                state == AIState.MoveToRememberedTarget ||
                state == AIState.InteractWithTarget;
+    }
+
+    private bool IsNeedDrivenState(AIState state)
+    {
+        return IsGoalExecutionState(state);
     }
 
     private void HandleIdleWander()
@@ -325,7 +333,7 @@ public class SimpleNPCBrain : MonoBehaviour
         if (HandlePendingDoorTarget())
             return;
 
-        if (IsNeedCurrentlySatisfied(currentNeedType))
+        if (currentNeedActionIsUrgentDriven && IsNeedCurrentlySatisfied(currentNeedType))
         {
             Narrate("Okay, that's better.", "explore-need-satisfied");
             AbortCurrentNeedAction();
@@ -969,7 +977,7 @@ public class SimpleNPCBrain : MonoBehaviour
             return;
         }
 
-        if (IsNeedCurrentlySatisfied(currentNeedType))
+        if (currentNeedActionIsUrgentDriven && IsNeedCurrentlySatisfied(currentNeedType))
         {
             Narrate("Already feeling better. I'll stop here.", "move-target-need-satisfied");
             AbortCurrentNeedAction();
@@ -1015,7 +1023,7 @@ public class SimpleNPCBrain : MonoBehaviour
             return;
         }
 
-        if (IsNeedCurrentlySatisfied(currentNeedType))
+        if (currentNeedActionIsUrgentDriven && IsNeedCurrentlySatisfied(currentNeedType))
         {
             Narrate("That did the trick. I'll calm down.", "move-remembered-need-satisfied");
             AbortCurrentNeedAction();
@@ -1163,7 +1171,7 @@ public class SimpleNPCBrain : MonoBehaviour
         hasExplorePoint = false;
         hasIdlePoint = false;
 
-        if (IsNeedCurrentlySatisfied(currentNeedType))
+        if (currentNeedActionIsUrgentDriven && IsNeedCurrentlySatisfied(currentNeedType))
         {
             Narrate(Pick(
                 "Much better.",
@@ -1186,30 +1194,44 @@ public class SimpleNPCBrain : MonoBehaviour
     private bool TryPickUpCurrentTarget(IPickupable pickupable)
     {
         if (!pickupable.CanPickUp(gameObject))
+        {
+            DebugPickup("Pickup rejected by CanPickUp().");
             return false;
+        }
 
         Interactable item = pickupable as Interactable;
         if (item == null)
+        {
+            DebugPickup("Pickup target is not an Interactable.");
             return false;
+        }
 
         if (!npcInventory.IsFull)
         {
             if (npcInventory.TryAddItem(item))
             {
                 Narrate("I'll take that for later.", "pickup-store");
+                DebugPickup("Pickup succeeded and stored for later: " + item.name);
                 return true;
             }
 
+            DebugPickup("Inventory had space but TryAddItem() failed for: " + item.name);
             return false;
         }
 
         Interactable leastValuable = npcInventory.GetLeastValuableItem();
         if (leastValuable == null)
+        {
+            DebugPickup("Inventory reported full but no least valuable item was found.");
             return false;
+        }
 
         IPickupable leastPickupable = leastValuable as IPickupable;
         if (leastPickupable == null)
+        {
+            DebugPickup("Least valuable carried item is not IPickupable.");
             return false;
+        }
 
         if (pickupable.GetItemValue() > leastPickupable.GetItemValue())
         {
@@ -1219,12 +1241,15 @@ public class SimpleNPCBrain : MonoBehaviour
             if (!npcInventory.TryAddItem(item))
             {
                 Debug.LogWarning(gameObject.name + ": dropped inventory item but failed to pick up replacement.");
+                DebugPickup("Swap pickup failed after dropping an item.");
                 return false;
             }
 
+            DebugPickup("Swapped inventory item and picked up: " + item.name);
             return true;
         }
 
+        DebugPickup("Pickup declined because carried items were equal or better value.");
         return false;
     }
 
@@ -1246,6 +1271,8 @@ public class SimpleNPCBrain : MonoBehaviour
 
     private void AbortCurrentNeedAction()
     {
+        DebugAbort("AbortCurrentNeedAction");
+
         ResetStallTimer();
         currentTarget = null;
         currentMemoryTarget = null;
@@ -1707,6 +1734,8 @@ public class SimpleNPCBrain : MonoBehaviour
         currentNeedType = bestNeed;
         currentNeedActionIsUrgentDriven = false;
 
+        DebugFlow("Opportunistic target selected for need: " + bestNeed);
+
         if (bestNeed == NeedType.Comfort)
         {
             if (TryMoveToVisibleComfortZone(opportunisticTargetMaxDistance))
@@ -2012,5 +2041,30 @@ public class SimpleNPCBrain : MonoBehaviour
             eventKey,
             category
         );
+    }
+
+    private void DebugAbort(string reason)
+    {
+        if (!debugOpportunisticFlow)
+            return;
+
+        Debug.Log($"{name} | {reason} | urgentDriven={currentNeedActionIsUrgentDriven} | state={currentState} | need={currentNeedType}");
+    }
+
+    private void DebugPickup(string reason)
+    {
+        if (!debugOpportunisticFlow)
+            return;
+
+        string targetName = currentTarget != null ? currentTarget.name : "null";
+        Debug.Log($"{name} | Pickup | {reason} | target={targetName} | state={currentState} | need={currentNeedType} | urgentDriven={currentNeedActionIsUrgentDriven}");
+    }
+
+    private void DebugFlow(string reason)
+    {
+        if (!debugOpportunisticFlow)
+            return;
+
+        Debug.Log($"{name} | Flow | {reason} | state={currentState} | need={currentNeedType} | urgentDriven={currentNeedActionIsUrgentDriven}");
     }
 }
