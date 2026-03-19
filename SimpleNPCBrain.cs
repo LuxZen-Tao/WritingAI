@@ -64,6 +64,7 @@ public class SimpleNPCBrain : MonoBehaviour
     private float opportunisticCheckTimer = 0f;
     private const float KeyPickupPriorityMultiplier = 3f;
     private const float MatchingLockedDoorKeyPriorityMultiplier = 3f;
+    private const float MatchingLockedDoorNarrationCooldown = 4f;
 
     [Header("Idle Wander")]
     public float idleWanderRadius = 3f;
@@ -135,6 +136,7 @@ public class SimpleNPCBrain : MonoBehaviour
     private readonly Dictionary<NeedType, NeedsManager.NeedUrgencyBand> lastNeedBands = new Dictionary<NeedType, NeedsManager.NeedUrgencyBand>();
     private readonly Dictionary<NeedType, bool> lastNeedUrgentFlags = new Dictionary<NeedType, bool>();
     private float lastOpportunisticComfortLightTime = -999f;
+    private float lastMatchingLockedDoorKeyNarrationTime = -999f;
 
     private void Start()
     {
@@ -1511,6 +1513,10 @@ public class SimpleNPCBrain : MonoBehaviour
             if (lockedDoorMemory == null || string.IsNullOrWhiteSpace(lockedDoorMemory.requiredKeyId))
                 continue;
 
+            DoorController controller = lockedDoorMemory.door != null ? lockedDoorMemory.door.GetDoorController() : null;
+            if (controller == null || !controller.IsLocked)
+                continue;
+
             if (DoorController.KeyIdsMatch(lockedDoorMemory.requiredKeyId, keyId))
                 return true;
         }
@@ -2106,8 +2112,11 @@ public class SimpleNPCBrain : MonoBehaviour
         if (!IsPathReachable(targetPosition) && !TryHandleDoorForDestination(targetPosition))
             return false;
 
-        if (bestItem is IKeyItem bestKeyItem && IsKeyUsefulForRememberedLockedDoor(bestKeyItem))
+        if (bestItem is IKeyItem bestKeyItem &&
+            IsKeyUsefulForRememberedLockedDoor(bestKeyItem) &&
+            Time.time >= lastMatchingLockedDoorKeyNarrationTime + MatchingLockedDoorNarrationCooldown)
         {
+            lastMatchingLockedDoorKeyNarrationTime = Time.time;
             Narrate("That key could help with that locked door.", "opportunity-key-matches-locked-door");
         }
 
