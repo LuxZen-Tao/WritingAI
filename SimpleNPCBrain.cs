@@ -58,6 +58,7 @@ public class SimpleNPCBrain : MonoBehaviour
 
     [Header("Opportunistic Needs")]
     public float opportunisticTargetMaxDistance = 2.5f;
+    public float opportunisticComfortLightCooldown = 6f;
     [Header("Opportunistic Check")]
     public float opportunisticCheckInterval = 0.5f;
     private float opportunisticCheckTimer = 0f;
@@ -127,6 +128,7 @@ public class SimpleNPCBrain : MonoBehaviour
 
     private readonly Dictionary<NeedType, NeedsManager.NeedUrgencyBand> lastNeedBands = new Dictionary<NeedType, NeedsManager.NeedUrgencyBand>();
     private readonly Dictionary<NeedType, bool> lastNeedUrgentFlags = new Dictionary<NeedType, bool>();
+    private float lastOpportunisticComfortLightTime = -999f;
 
     private void Start()
     {
@@ -1890,6 +1892,13 @@ public class SimpleNPCBrain : MonoBehaviour
 
     if (bestNeed == NeedType.Comfort)
     {
+        if (TryHandleOpportunisticComfortLight())
+        {
+            DebugFlow("Opportunistic action: comfort light switch interaction target acquired.");
+            Narrate("This room is dim. I'll flip that switch quickly.", "opportunity-comfort-light-switch");
+            return true;
+        }
+
         DebugFlow("Opportunistic action: trying visible comfort zone within range " + opportunisticTargetMaxDistance);
 
         if (TryMoveToVisibleComfortZone(opportunisticTargetMaxDistance))
@@ -1919,11 +1928,95 @@ public class SimpleNPCBrain : MonoBehaviour
     {
         if (needType == NeedType.Comfort)
         {
+            if (HasEasyVisibleComfortLightOpportunity())
+                return true;
+
             if (TryFindBestVisibleComfortRoom(opportunisticTargetMaxDistance, out _, out _))
                 return true;
         }
 
         return TryFindBestVisibleTarget(needType, opportunisticTargetMaxDistance, out _, out _);
+    }
+
+    private bool HasEasyVisibleComfortLightOpportunity()
+    {
+        if (Time.time < lastOpportunisticComfortLightTime + opportunisticComfortLightCooldown)
+            return false;
+
+        return TryFindBestVisibleComfortLightSwitch(opportunisticTargetMaxDistance, out _, out _);
+    }
+
+    private bool TryHandleOpportunisticComfortLight()
+    {
+        if (!HasEasyVisibleComfortLightOpportunity())
+            return false;
+
+        if (!TryFindBestVisibleComfortLightSwitch(opportunisticTargetMaxDistance, out LightSwitchInteractable bestSwitch, out _))
+            return false;
+
+        RememberInteractable(bestSwitch, NeedType.Comfort);
+        currentNeedType = NeedType.Comfort;
+        currentTarget = bestSwitch;
+        currentMemoryTarget = null;
+        currentComfortZoneTarget = null;
+        hasExplorePoint = false;
+        hasIdlePoint = false;
+        agent.ResetPath();
+
+        Vector3 targetPosition = currentTarget.GetInteractionPoint();
+        if (!IsPathReachable(targetPosition) && !TryHandleDoorForDestination(targetPosition))
+            return false;
+
+        lastOpportunisticComfortLightTime = Time.time;
+        ChangeState(AIState.MoveToTarget);
+        return true;
+    }
+
+    private bool TryFindBestVisibleComfortLightSwitch(float maxDistance, out LightSwitchInteractable bestSwitch, out float bestDistance)
+    {
+        Collider[] hits = Physics.OverlapSphere(transform.position, visionRange, interactableLayer);
+
+        bestSwitch = null;
+        bestDistance = Mathf.Infinity;
+        bool currentAreaLit = IsCurrentAreaLit();
+
+        for (int i = 0; i < hits.Length; i++)
+        {
+            Interactable interactable = hits[i].GetComponentInParent<Interactable>();
+            LightSwitchInteractable lightSwitch = interactable as LightSwitchInteractable;
+
+            if (lightSwitch == null || !lightSwitch.isEnabled)
+                continue;
+
+            if (!CanSeeInteractable(lightSwitch))
+                continue;
+
+            if (!lightSwitch.CanInteract(gameObject))
+                continue;
+
+            RoomArea targetRoom = lightSwitch.targetRoom;
+            if (targetRoom == null || targetRoom.IsLit())
+                continue;
+
+            bool isCurrentRoomSwitch = currentRoom != null && targetRoom == currentRoom;
+            float roomDistance = Vector3.Distance(transform.position, targetRoom.GetRoomCenterPoint());
+            bool isNearbyRoom = roomDistance <= maxDistance * 1.5f;
+
+            if (!isCurrentRoomSwitch && !isNearbyRoom)
+                continue;
+
+            if (currentAreaLit && !isCurrentRoomSwitch)
+                continue;
+
+            float distance = Vector3.Distance(transform.position, lightSwitch.GetInteractionPoint());
+            if (distance > maxDistance || distance >= bestDistance)
+                continue;
+
+            bestDistance = distance;
+            bestSwitch = lightSwitch;
+        }
+
+        return bestSwitch != null;
     }
 
     private bool TryFindBestVisibleTarget(NeedType needType, float maxDistance, out Interactable bestTarget, out float bestDistance)
