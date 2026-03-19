@@ -1558,7 +1558,20 @@ public class SimpleNPCBrain : MonoBehaviour
         if (door == null || npcInventory == null)
             return false;
 
-        return false;
+        DoorController controller = door.GetDoorController();
+        if (controller == null || !controller.IsLocked)
+            return false;
+
+        if (!npcInventory.TryGetMatchingKey(controller.RequiredKeyId, out IKeyItem key))
+            return false;
+
+        bool unlocked = controller.TryUnlock(key.GetKeyId());
+        if (unlocked)
+        {
+            Narrate("Good thing I kept this key. That lock is open now.", "door-unlock-success");
+        }
+
+        return unlocked;
     }
 
     private void OnTriggerEnter(Collider other)
@@ -2203,6 +2216,9 @@ public class SimpleNPCBrain : MonoBehaviour
         if (controller == null)
             return false;
 
+        if (controller.IsLocked && !HasMatchingInventoryKey(controller))
+            return false;
+
         if (controller.IsOpen)
         {
             pendingDoorTarget = null;
@@ -2263,6 +2279,21 @@ public class SimpleNPCBrain : MonoBehaviour
 
             pendingDoorTarget.Interact(gameObject);
             lastDoorInteractTime = Time.time;
+
+            if (!controller.IsOpen && controller.IsLocked)
+            {
+                if (TryUseInventoryKeyOnDoor(pendingDoorTarget))
+                {
+                    pendingDoorTarget.Interact(gameObject);
+                }
+                else
+                {
+                    pendingDoorTarget = null;
+                    hasPendingDoorDestination = false;
+                    return false;
+                }
+            }
+
             ResetStallTimer();
         }
 
@@ -2276,6 +2307,20 @@ public class SimpleNPCBrain : MonoBehaviour
         hasPendingDoorDestination = true;
         agent.ResetPath();
         ResetStallTimer();
+    }
+
+    private bool HasMatchingInventoryKey(DoorController controller)
+    {
+        if (controller == null)
+            return false;
+
+        if (!controller.IsLocked)
+            return true;
+
+        if (npcInventory == null)
+            return false;
+
+        return npcInventory.TryGetMatchingKey(controller.RequiredKeyId, out _);
     }
 
     private void RepathCurrentMovementDestination()
