@@ -10,6 +10,9 @@ public class RestInteractable : Interactable, INeedSatisfier
     [SerializeField] protected float maxRestPerSession = 4f;
     [SerializeField] protected float minimumRestDuration = 1.5f;
     [SerializeField] protected float maximumRestDuration = 0f;
+    [SerializeField] protected Transform restAnchor;
+    [SerializeField] protected float minimumHoldTime = 1.5f;
+    [SerializeField] protected float anchorSnapDistance = 0.35f;
     [SerializeField] protected float desirability = 1f;
 
     private float remainingSessionRecovery = 0f;
@@ -19,8 +22,12 @@ public class RestInteractable : Interactable, INeedSatisfier
     public float MaxRestPerSession => Mathf.Max(0f, maxRestPerSession);
     public float MinimumRestDuration => Mathf.Max(0f, minimumRestDuration);
     public float MaximumRestDuration => Mathf.Max(0f, maximumRestDuration);
+    public float MinimumHoldTime => Mathf.Max(0f, minimumHoldTime);
+    public float AnchorSnapDistance => Mathf.Max(0f, anchorSnapDistance);
     public float Desirability => Mathf.Max(0f, desirability);
     public float RemainingSessionRecovery => Mathf.Max(0f, remainingSessionRecovery);
+    public Transform RestAnchor => restAnchor != null ? restAnchor : transform;
+    public Vector3 RestAnchorPosition => RestAnchor.position;
 
     public override bool CanInteract(GameObject interactor)
     {
@@ -83,4 +90,10 @@ public class RestInteractable : Interactable, INeedSatisfier
     public NeedType GetNeedType() => providedNeed;
 
     public float GetNeedValue() => MaxRestPerSession;
+
+    private void OnValidate()
+    {
+        if (restAnchor == null)
+            restAnchor = transform;
+    }
 }
