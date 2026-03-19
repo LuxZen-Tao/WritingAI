@@ -62,6 +62,9 @@ public class SimpleNPCBrain : MonoBehaviour
     [Header("Opportunistic Check")]
     public float opportunisticCheckInterval = 0.5f;
     private float opportunisticCheckTimer = 0f;
+    private const float KeyPickupPriorityMultiplier = 3f;
+    private const float MatchingLockedDoorKeyPriorityMultiplier = 3f;
+    private const float MatchingLockedDoorNarrationCooldown = 4f;
 
     [Header("Idle Wander")]
     public float idleWanderRadius = 3f;
@@ -89,6 +92,10 @@ public class SimpleNPCBrain : MonoBehaviour
     public List<RememberedLocation> rememberedLocations = new List<RememberedLocation>();
     public float locationMemoryDuration = 10f;
     public float locationAvoidanceRadius = 2f;
+
+    [Header("Memory - Locked Doors")]
+    public List<RememberedLockedDoor> rememberedLockedDoors = new List<RememberedLockedDoor>();
+    public float lockedDoorMemoryDuration = 90f;
 
     [Header("Current Target")]
     public Interactable currentTarget;
@@ -129,6 +136,7 @@ public class SimpleNPCBrain : MonoBehaviour
     private readonly Dictionary<NeedType, NeedsManager.NeedUrgencyBand> lastNeedBands = new Dictionary<NeedType, NeedsManager.NeedUrgencyBand>();
     private readonly Dictionary<NeedType, bool> lastNeedUrgentFlags = new Dictionary<NeedType, bool>();
     private float lastOpportunisticComfortLightTime = -999f;
+    private float lastMatchingLockedDoorKeyNarrationTime = -999f;
 
     private void Start()
     {
@@ -178,6 +186,7 @@ public class SimpleNPCBrain : MonoBehaviour
         CleanupLocationMemory();
         CleanupInteractableMemory();
         CleanupComfortZoneMemory();
+        CleanupLockedDoorMemory();
 
         PassiveObserveVisibleInteractables();
         PassiveObserveVisibleComfortZones();
@@ -1433,6 +1442,88 @@ public class SimpleNPCBrain : MonoBehaviour
         rememberedLocations.RemoveAll(loc => Time.time - loc.timeStored > locationMemoryDuration);
     }
 
+    private void CleanupLockedDoorMemory()
+    {
+        rememberedLockedDoors.RemoveAll(lockedDoorMemory =>
+        {
+            if (lockedDoorMemory == null || lockedDoorMemory.door == null)
+                return true;
+
+            if (Time.time - lockedDoorMemory.lastSeenTime > lockedDoorMemoryDuration)
+                return true;
+
+            DoorController controller = lockedDoorMemory.door.GetDoorController();
+            if (controller == null || !controller.IsLocked)
+                return true;
+
+            if (string.IsNullOrWhiteSpace(lockedDoorMemory.requiredKeyId))
+                return true;
+
+            return false;
+        });
+    }
+
+    private void RememberLockedDoor(DoorInteractable door)
+    {
+        if (door == null)
+            return;
+
+        DoorController controller = door.GetDoorController();
+        if (controller == null || !controller.IsLocked)
+            return;
+
+        string requiredKeyId = controller.RequiredKeyId;
+        if (string.IsNullOrWhiteSpace(requiredKeyId))
+            return;
+
+        for (int i = 0; i < rememberedLockedDoors.Count; i++)
+        {
+            RememberedLockedDoor remembered = rememberedLockedDoors[i];
+            if (remembered == null || remembered.door != door)
+                continue;
+
+            remembered.lastKnownPosition = door.GetInteractionPoint();
+            remembered.requiredKeyId = requiredKeyId;
+            remembered.lastSeenTime = Time.time;
+            return;
+        }
+
+        rememberedLockedDoors.Add(new RememberedLockedDoor(
+            door,
+            door.GetInteractionPoint(),
+            requiredKeyId,
+            Time.time
+        ));
+
+        Narrate("I can't open that. I'll remember it.", "memory-locked-door-" + door.GetInstanceID());
+    }
+
+    private bool IsKeyUsefulForRememberedLockedDoor(IKeyItem keyItem)
+    {
+        if (keyItem == null)
+            return false;
+
+        string keyId = keyItem.GetKeyId();
+        if (string.IsNullOrWhiteSpace(keyId))
+            return false;
+
+        for (int i = 0; i < rememberedLockedDoors.Count; i++)
+        {
+            RememberedLockedDoor lockedDoorMemory = rememberedLockedDoors[i];
+            if (lockedDoorMemory == null || string.IsNullOrWhiteSpace(lockedDoorMemory.requiredKeyId))
+                continue;
+
+            DoorController controller = lockedDoorMemory.door != null ? lockedDoorMemory.door.GetDoorController() : null;
+            if (controller == null || !controller.IsLocked)
+                continue;
+
+            if (DoorController.KeyIdsMatch(lockedDoorMemory.requiredKeyId, keyId))
+                return true;
+        }
+
+        return false;
+    }
+
     private bool IsRecentlyVisited(Vector3 position)
     {
         foreach (RememberedLocation loc in rememberedLocations)
@@ -1542,13 +1633,20 @@ public class SimpleNPCBrain : MonoBehaviour
             return true;
 
         if (npcInventory == null)
+        {
+            if (controller.IsLocked)
+                RememberLockedDoor(door);
             return false;
+        }
 
         if (TryUseInventoryKeyOnDoor(door))
         {
             door.Interact(gameObject);
             return controller.IsOpen;
         }
+
+        if (controller.IsLocked)
+            RememberLockedDoor(door);
 
         return false;
     }
@@ -1558,7 +1656,20 @@ public class SimpleNPCBrain : MonoBehaviour
         if (door == null || npcInventory == null)
             return false;
 
-        return false;
+        DoorController controller = door.GetDoorController();
+        if (controller == null || !controller.IsLocked)
+            return false;
+
+        if (!npcInventory.TryGetMatchingKey(controller.RequiredKeyId, out IKeyItem key))
+            return false;
+
+        bool unlocked = controller.TryUnlock(key.GetKeyId());
+        if (unlocked)
+        {
+            Narrate("Good thing I kept this key. That lock is open now.", "door-unlock-success");
+        }
+
+        return unlocked;
     }
 
     private void OnTriggerEnter(Collider other)
@@ -1820,109 +1931,198 @@ public class SimpleNPCBrain : MonoBehaviour
     }
 
     private bool TryHandleOpportunisticNeed()
-{
-    if (needsManager == null || needsManager.needs == null)
     {
-        DebugFlow("Opportunistic check aborted: needsManager or needs list is null.");
-        return false;
-    }
-
-    if (needsManager.HasUrgentNeed())
-    {
-        DebugFlow("Opportunistic check aborted: urgent need exists.");
-        return false;
-    }
-
-    DebugFlow("Opportunistic check started.");
-
-    NeedType bestNeed = NeedType.Comfort;
-    float bestScore = float.MinValue;
-    bool foundOpportunity = false;
-
-    for (int i = 0; i < needsManager.needs.Count; i++)
-    {
-        NeedsManager.NeedState need = needsManager.needs[i];
-        if (need == null)
+        if (needsManager == null || needsManager.needs == null)
         {
-            DebugFlow("Opportunistic check: skipped null need entry.");
-            continue;
+            DebugFlow("Opportunistic check aborted: needsManager or needs list is null.");
+            return false;
         }
 
-        NeedType needType = need.needType;
-        DebugFlow("Opportunistic check: evaluating need " + needType);
-
-        if (!needsManager.ShouldOpportunisticallySatisfy(needType))
+        if (needsManager.HasUrgentNeed())
         {
-            DebugFlow("Opportunistic check: rejected " + needType + " because ShouldOpportunisticallySatisfy returned false.");
-            continue;
+            DebugFlow("Opportunistic check aborted: urgent need exists.");
+            return false;
         }
 
-        if (!HasEasyVisibleOpportunity(needType))
+        DebugFlow("Opportunistic check started.");
+
+        NeedType bestNeed = NeedType.Comfort;
+        float bestScore = float.MinValue;
+        bool foundOpportunity = false;
+
+        for (int i = 0; i < needsManager.needs.Count; i++)
         {
-            DebugFlow("Opportunistic check: rejected " + needType + " because no easy visible opportunity was found within range " + opportunisticTargetMaxDistance);
-            continue;
+            NeedsManager.NeedState need = needsManager.needs[i];
+            if (need == null)
+            {
+                DebugFlow("Opportunistic check: skipped null need entry.");
+                continue;
+            }
+
+            NeedType needType = need.needType;
+            DebugFlow("Opportunistic check: evaluating need " + needType);
+
+            if (!needsManager.ShouldOpportunisticallySatisfy(needType))
+            {
+                DebugFlow("Opportunistic check: rejected " + needType + " because ShouldOpportunisticallySatisfy returned false.");
+                continue;
+            }
+
+            if (!HasEasyVisibleOpportunity(needType))
+            {
+                DebugFlow("Opportunistic check: rejected " + needType + " because no easy visible opportunity was found within range " + opportunisticTargetMaxDistance);
+                continue;
+            }
+
+            float score = needsManager.GetNeedPriorityScore(needType);
+            DebugFlow("Opportunistic check: " + needType + " has visible opportunity with priority score " + score);
+
+            if (score <= bestScore)
+            {
+                DebugFlow("Opportunistic check: " + needType + " lost to current best score " + bestScore);
+                continue;
+            }
+
+            bestNeed = needType;
+            bestScore = score;
+            foundOpportunity = true;
+
+            DebugFlow("Opportunistic check: " + needType + " is the new best opportunistic need.");
         }
 
-        float score = needsManager.GetNeedPriorityScore(needType);
-        DebugFlow("Opportunistic check: " + needType + " has visible opportunity with priority score " + score);
-
-        if (score <= bestScore)
+        if (!foundOpportunity)
         {
-            DebugFlow("Opportunistic check: " + needType + " lost to current best score " + bestScore);
-            continue;
+            if (TryAcquireOpportunisticPickupTarget(opportunisticTargetMaxDistance))
+            {
+                Narrate("That might be useful. I'll grab it.", "opportunity-item-pickup");
+                return true;
+            }
+
+            DebugFlow("Opportunistic check finished: no valid opportunity selected.");
+            return false;
         }
 
-        bestNeed = needType;
-        bestScore = score;
-        foundOpportunity = true;
+        currentNeedType = bestNeed;
+        currentNeedActionIsUrgentDriven = false;
 
-        DebugFlow("Opportunistic check: " + needType + " is the new best opportunistic need.");
-    }
+        DebugFlow("Opportunistic target selected for need: " + bestNeed + " with score " + bestScore);
 
-    if (!foundOpportunity)
-    {
-        DebugFlow("Opportunistic check finished: no valid opportunity selected.");
-        return false;
-    }
-
-    currentNeedType = bestNeed;
-    currentNeedActionIsUrgentDriven = false;
-
-    DebugFlow("Opportunistic target selected for need: " + bestNeed + " with score " + bestScore);
-
-    if (bestNeed == NeedType.Comfort)
-    {
-        if (TryHandleOpportunisticComfortLight())
+        if (bestNeed == NeedType.Comfort)
         {
-            DebugFlow("Opportunistic action: comfort light switch interaction target acquired.");
-            Narrate("This room is dim. I'll flip that switch quickly.", "opportunity-comfort-light-switch");
+            if (TryHandleOpportunisticComfortLight())
+            {
+                DebugFlow("Opportunistic action: comfort light switch interaction target acquired.");
+                Narrate("This room is dim. I'll flip that switch quickly.", "opportunity-comfort-light-switch");
+                return true;
+            }
+
+            DebugFlow("Opportunistic action: trying visible comfort zone within range " + opportunisticTargetMaxDistance);
+
+            if (TryMoveToVisibleComfortZone(opportunisticTargetMaxDistance))
+            {
+                DebugFlow("Opportunistic action: comfort zone move succeeded.");
+                Narrate("That nearby lit area could help a little.", "opportunity-comfort-room");
+                return true;
+            }
+
+            DebugFlow("Opportunistic action: comfort zone move failed.");
+        }
+
+        DebugFlow("Opportunistic action: trying visible target for need " + bestNeed + " within range " + opportunisticTargetMaxDistance);
+
+        if (TryAcquireVisibleTarget(bestNeed, opportunisticTargetMaxDistance))
+        {
+            DebugFlow("Opportunistic action: visible target acquisition succeeded for need " + bestNeed);
+            Narrate("Easy opportunity. I'll handle this quickly.", "opportunity-interactable");
             return true;
         }
 
-        DebugFlow("Opportunistic action: trying visible comfort zone within range " + opportunisticTargetMaxDistance);
-
-        if (TryMoveToVisibleComfortZone(opportunisticTargetMaxDistance))
+        if (TryAcquireOpportunisticPickupTarget(opportunisticTargetMaxDistance))
         {
-            DebugFlow("Opportunistic action: comfort zone move succeeded.");
-            Narrate("That nearby lit area could help a little.", "opportunity-comfort-room");
+            Narrate("That might be useful. I'll grab it.", "opportunity-item-pickup");
             return true;
         }
 
-        DebugFlow("Opportunistic action: comfort zone move failed.");
+        DebugFlow("Opportunistic action: visible target acquisition failed for need " + bestNeed);
+        return false;
     }
 
-    DebugFlow("Opportunistic action: trying visible target for need " + bestNeed + " within range " + opportunisticTargetMaxDistance);
-
-    if (TryAcquireVisibleTarget(bestNeed, opportunisticTargetMaxDistance))
+    private bool TryAcquireOpportunisticPickupTarget(float maxDistance)
     {
-        DebugFlow("Opportunistic action: visible target acquisition succeeded for need " + bestNeed);
-        Narrate("Easy opportunity. I'll handle this quickly.", "opportunity-interactable");
+        Collider[] hits = Physics.OverlapSphere(transform.position, visionRange, interactableLayer);
+
+        Interactable bestItem = null;
+        float bestScore = float.MinValue;
+        float bestDistance = Mathf.Infinity;
+
+        for (int i = 0; i < hits.Length; i++)
+        {
+            Interactable interactable = hits[i].GetComponentInParent<Interactable>();
+            if (interactable == null || !interactable.isEnabled)
+                continue;
+
+            if (!CanSeeInteractable(interactable))
+                continue;
+
+            IPickupable pickupable = interactable as IPickupable;
+            if (pickupable == null || !pickupable.CanPickUp(gameObject))
+                continue;
+
+            if (!interactable.CanInteract(gameObject))
+                continue;
+
+            float distance = Vector3.Distance(transform.position, interactable.GetInteractionPoint());
+            if (distance > maxDistance)
+                continue;
+
+            float score = pickupable.GetItemValue();
+            IKeyItem keyItem = interactable as IKeyItem;
+            bool keyMatchesRememberedLockedDoor = false;
+            if (keyItem != null)
+            {
+                score *= KeyPickupPriorityMultiplier;
+                keyMatchesRememberedLockedDoor = IsKeyUsefulForRememberedLockedDoor(keyItem);
+                if (keyMatchesRememberedLockedDoor)
+                    score *= MatchingLockedDoorKeyPriorityMultiplier;
+            }
+
+            if (score < bestScore)
+                continue;
+
+            if (Mathf.Approximately(score, bestScore) && distance >= bestDistance)
+                continue;
+
+            bestItem = interactable;
+            bestScore = score;
+            bestDistance = distance;
+        }
+
+        if (bestItem == null)
+            return false;
+
+        currentTarget = bestItem;
+        currentMemoryTarget = null;
+        currentComfortZoneTarget = null;
+        hasExplorePoint = false;
+        hasIdlePoint = false;
+        currentNeedActionIsUrgentDriven = false;
+        agent.ResetPath();
+
+        Vector3 targetPosition = currentTarget.GetInteractionPoint();
+        if (!IsPathReachable(targetPosition) && !TryHandleDoorForDestination(targetPosition))
+            return false;
+
+        if (bestItem is IKeyItem bestKeyItem &&
+            IsKeyUsefulForRememberedLockedDoor(bestKeyItem) &&
+            Time.time >= lastMatchingLockedDoorKeyNarrationTime + MatchingLockedDoorNarrationCooldown)
+        {
+            lastMatchingLockedDoorKeyNarrationTime = Time.time;
+            Narrate("That key could help with that locked door.", "opportunity-key-matches-locked-door");
+        }
+
+        ChangeState(AIState.MoveToTarget);
         return true;
     }
-
-    DebugFlow("Opportunistic action: visible target acquisition failed for need " + bestNeed);
-    return false;
-}
 
     private bool HasEasyVisibleOpportunity(NeedType needType)
     {
@@ -2020,86 +2220,86 @@ public class SimpleNPCBrain : MonoBehaviour
     }
 
     private bool TryFindBestVisibleTarget(NeedType needType, float maxDistance, out Interactable bestTarget, out float bestDistance)
-{
-    Collider[] hits = Physics.OverlapSphere(transform.position, visionRange, interactableLayer);
-
-    DebugFlow($"[FindTarget] Start search for {needType} | Hits found: {hits.Length} | visionRange: {visionRange} | maxDistance: {maxDistance}");
-
-    bestTarget = null;
-    bestDistance = Mathf.Infinity;
-
-    foreach (Collider hit in hits)
     {
-        Interactable interactable = hit.GetComponentInParent<Interactable>();
+        Collider[] hits = Physics.OverlapSphere(transform.position, visionRange, interactableLayer);
 
-        if (interactable == null)
+        DebugFlow($"[FindTarget] Start search for {needType} | Hits found: {hits.Length} | visionRange: {visionRange} | maxDistance: {maxDistance}");
+
+        bestTarget = null;
+        bestDistance = Mathf.Infinity;
+
+        foreach (Collider hit in hits)
         {
-            DebugFlow("[FindTarget] Skipped: no Interactable on collider " + hit.name);
-            continue;
+            Interactable interactable = hit.GetComponentInParent<Interactable>();
+
+            if (interactable == null)
+            {
+                DebugFlow("[FindTarget] Skipped: no Interactable on collider " + hit.name);
+                continue;
+            }
+
+            DebugFlow($"[FindTarget] Checking: {interactable.name}");
+
+            if (!interactable.isEnabled)
+            {
+                DebugFlow($"[FindTarget] Rejected {interactable.name}: isEnabled = false");
+                continue;
+            }
+
+            if (!CanSeeInteractable(interactable))
+            {
+                DebugFlow($"[FindTarget] Rejected {interactable.name}: cannot see (vision/angle/obstruction)");
+                continue;
+            }
+
+            INeedSatisfier satisfier = interactable as INeedSatisfier;
+            if (satisfier == null)
+            {
+                DebugFlow($"[FindTarget] Rejected {interactable.name}: not INeedSatisfier");
+                continue;
+            }
+
+            if (satisfier.GetNeedType() != needType)
+            {
+                DebugFlow($"[FindTarget] Rejected {interactable.name}: wrong need type ({satisfier.GetNeedType()} != {needType})");
+                continue;
+            }
+
+            if (!interactable.CanInteract(gameObject))
+            {
+                DebugFlow($"[FindTarget] Rejected {interactable.name}: CanInteract returned false");
+                continue;
+            }
+
+            float distance = Vector3.Distance(transform.position, interactable.GetInteractionPoint());
+
+            if (distance > maxDistance)
+            {
+                DebugFlow($"[FindTarget] Rejected {interactable.name}: too far ({distance} > {maxDistance})");
+                continue;
+            }
+
+            if (distance >= bestDistance)
+            {
+                DebugFlow($"[FindTarget] Rejected {interactable.name}: not closer than current best ({distance} >= {bestDistance})");
+                continue;
+            }
+
+            DebugFlow($"[FindTarget] Candidate accepted: {interactable.name} at distance {distance}");
+
+            bestDistance = distance;
+            bestTarget = interactable;
         }
 
-        DebugFlow($"[FindTarget] Checking: {interactable.name}");
-
-        if (!interactable.isEnabled)
+        if (bestTarget != null)
         {
-            DebugFlow($"[FindTarget] Rejected {interactable.name}: isEnabled = false");
-            continue;
+            DebugFlow($"[FindTarget] SUCCESS: Selected {bestTarget.name} at distance {bestDistance}");
+            return true;
         }
 
-        if (!CanSeeInteractable(interactable))
-        {
-            DebugFlow($"[FindTarget] Rejected {interactable.name}: cannot see (vision/angle/obstruction)");
-            continue;
-        }
-
-        INeedSatisfier satisfier = interactable as INeedSatisfier;
-        if (satisfier == null)
-        {
-            DebugFlow($"[FindTarget] Rejected {interactable.name}: not INeedSatisfier");
-            continue;
-        }
-
-        if (satisfier.GetNeedType() != needType)
-        {
-            DebugFlow($"[FindTarget] Rejected {interactable.name}: wrong need type ({satisfier.GetNeedType()} != {needType})");
-            continue;
-        }
-
-        if (!interactable.CanInteract(gameObject))
-        {
-            DebugFlow($"[FindTarget] Rejected {interactable.name}: CanInteract returned false");
-            continue;
-        }
-
-        float distance = Vector3.Distance(transform.position, interactable.GetInteractionPoint());
-
-        if (distance > maxDistance)
-        {
-            DebugFlow($"[FindTarget] Rejected {interactable.name}: too far ({distance} > {maxDistance})");
-            continue;
-        }
-
-        if (distance >= bestDistance)
-        {
-            DebugFlow($"[FindTarget] Rejected {interactable.name}: not closer than current best ({distance} >= {bestDistance})");
-            continue;
-        }
-
-        DebugFlow($"[FindTarget] Candidate accepted: {interactable.name} at distance {distance}");
-
-        bestDistance = distance;
-        bestTarget = interactable;
+        DebugFlow($"[FindTarget] FAILED: No valid target found for {needType}");
+        return false;
     }
-
-    if (bestTarget != null)
-    {
-        DebugFlow($"[FindTarget] SUCCESS: Selected {bestTarget.name} at distance {bestDistance}");
-        return true;
-    }
-
-    DebugFlow($"[FindTarget] FAILED: No valid target found for {needType}");
-    return false;
-}
 
     private bool TryFindBestVisibleComfortRoom(float maxDistance, out RoomArea bestRoom, out float bestDistance)
     {
@@ -2203,6 +2403,12 @@ public class SimpleNPCBrain : MonoBehaviour
         if (controller == null)
             return false;
 
+        if (controller.IsLocked && !HasMatchingInventoryKey(controller))
+        {
+            RememberLockedDoor(door);
+            return false;
+        }
+
         if (controller.IsOpen)
         {
             pendingDoorTarget = null;
@@ -2263,6 +2469,22 @@ public class SimpleNPCBrain : MonoBehaviour
 
             pendingDoorTarget.Interact(gameObject);
             lastDoorInteractTime = Time.time;
+
+            if (!controller.IsOpen && controller.IsLocked)
+            {
+                if (TryUseInventoryKeyOnDoor(pendingDoorTarget))
+                {
+                    pendingDoorTarget.Interact(gameObject);
+                }
+                else
+                {
+                    RememberLockedDoor(pendingDoorTarget);
+                    pendingDoorTarget = null;
+                    hasPendingDoorDestination = false;
+                    return false;
+                }
+            }
+
             ResetStallTimer();
         }
 
@@ -2276,6 +2498,20 @@ public class SimpleNPCBrain : MonoBehaviour
         hasPendingDoorDestination = true;
         agent.ResetPath();
         ResetStallTimer();
+    }
+
+    private bool HasMatchingInventoryKey(DoorController controller)
+    {
+        if (controller == null)
+            return false;
+
+        if (!controller.IsLocked)
+            return true;
+
+        if (npcInventory == null)
+            return false;
+
+        return npcInventory.TryGetMatchingKey(controller.RequiredKeyId, out _);
     }
 
     private void RepathCurrentMovementDestination()
