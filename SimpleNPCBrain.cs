@@ -2050,6 +2050,7 @@ public class SimpleNPCBrain : MonoBehaviour
     private bool TryAcquireOpportunisticPickupTarget(float maxDistance)
     {
         Collider[] hits = Physics.OverlapSphere(transform.position, visionRange, interactableLayer);
+        DebugFlow($"[PickupTarget] Start opportunistic pickup scan | hits={hits.Length} | maxDistance={maxDistance}");
 
         Interactable bestItem = null;
         float bestScore = float.MinValue;
@@ -2058,22 +2059,43 @@ public class SimpleNPCBrain : MonoBehaviour
         for (int i = 0; i < hits.Length; i++)
         {
             Interactable interactable = hits[i].GetComponentInParent<Interactable>();
-            if (interactable == null || !interactable.isEnabled)
+            if (interactable == null)
+            {
+                DebugFlow("[PickupTarget] Rejected collider: no Interactable in parent.");
                 continue;
+            }
+
+            if (!interactable.isEnabled)
+            {
+                DebugFlow($"[PickupTarget] Rejected {interactable.name}: isEnabled = false");
+                continue;
+            }
 
             if (!CanSeeInteractable(interactable))
+            {
+                DebugFlow($"[PickupTarget] Rejected {interactable.name}: cannot see interactable");
                 continue;
+            }
 
             IPickupable pickupable = interactable as IPickupable;
-            if (pickupable == null || !pickupable.CanPickUp(gameObject))
+            if (pickupable == null)
+            {
+                DebugFlow($"[PickupTarget] Rejected {interactable.name}: not IPickupable");
                 continue;
+            }
 
-            if (!interactable.CanInteract(gameObject))
+            if (!pickupable.CanPickUp(gameObject))
+            {
+                DebugFlow($"[PickupTarget] Rejected {interactable.name}: CanPickUp returned false");
                 continue;
+            }
 
             float distance = Vector3.Distance(transform.position, interactable.GetInteractionPoint());
             if (distance > maxDistance)
+            {
+                DebugFlow($"[PickupTarget] Rejected {interactable.name}: too far ({distance} > {maxDistance})");
                 continue;
+            }
 
             float score = pickupable.GetItemValue();
             IKeyItem keyItem = interactable as IKeyItem;
@@ -2092,13 +2114,17 @@ public class SimpleNPCBrain : MonoBehaviour
             if (Mathf.Approximately(score, bestScore) && distance >= bestDistance)
                 continue;
 
+            DebugFlow($"[PickupTarget] Candidate accepted: {interactable.name} | score={score} | distance={distance}");
             bestItem = interactable;
             bestScore = score;
             bestDistance = distance;
         }
 
         if (bestItem == null)
+        {
+            DebugFlow("[PickupTarget] FAILED: no eligible opportunistic pickup target found.");
             return false;
+        }
 
         currentTarget = bestItem;
         currentMemoryTarget = null;
@@ -2110,7 +2136,12 @@ public class SimpleNPCBrain : MonoBehaviour
 
         Vector3 targetPosition = currentTarget.GetInteractionPoint();
         if (!IsPathReachable(targetPosition) && !TryHandleDoorForDestination(targetPosition))
+        {
+            DebugFlow($"[PickupTarget] Selected {currentTarget.name} but destination is unreachable.");
             return false;
+        }
+
+        DebugFlow($"[PickupTarget] SUCCESS: selected {currentTarget.name} | score={bestScore} | distance={bestDistance}");
 
         if (bestItem is IKeyItem bestKeyItem &&
             IsKeyUsefulForRememberedLockedDoor(bestKeyItem) &&
