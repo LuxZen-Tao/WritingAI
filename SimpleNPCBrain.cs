@@ -10,7 +10,8 @@ public class SimpleNPCBrain : MonoBehaviour
         Explore,
         MoveToTarget,
         MoveToRememberedTarget,
-        InteractWithTarget
+        InteractWithTarget,
+        Resting
     }
 
     [Header("State")]
@@ -137,6 +138,7 @@ public class SimpleNPCBrain : MonoBehaviour
     private Vector3 pendingDoorDestination;
     private bool hasPendingDoorDestination = false;
     private int currentExploreDoorRouteAttempts = 0;
+    private RestInteractable currentRestInteractable;
 
     private readonly Dictionary<NeedType, NeedsManager.NeedUrgencyBand> lastNeedBands = new Dictionary<NeedType, NeedsManager.NeedUrgencyBand>();
     private readonly Dictionary<NeedType, bool> lastNeedUrgentFlags = new Dictionary<NeedType, bool>();
@@ -276,6 +278,10 @@ public class SimpleNPCBrain : MonoBehaviour
             case AIState.InteractWithTarget:
                 InteractWithCurrentTarget();
                 break;
+
+            case AIState.Resting:
+                HandleRestingState();
+                break;
         }
     }
 
@@ -308,7 +314,8 @@ public class SimpleNPCBrain : MonoBehaviour
         return state == AIState.Explore ||
                state == AIState.MoveToTarget ||
                state == AIState.MoveToRememberedTarget ||
-               state == AIState.InteractWithTarget;
+               state == AIState.InteractWithTarget ||
+               state == AIState.Resting;
     }
 
     private bool IsNeedDrivenState(AIState state)
@@ -1218,6 +1225,19 @@ public class SimpleNPCBrain : MonoBehaviour
                 ), "interact-attempt");
 
                 currentTarget.Interact(gameObject);
+
+                RestInteractable restTarget = currentTarget as RestInteractable;
+                if (restTarget != null && currentNeedType == restTarget.GetNeedType())
+                {
+                    if (restTarget.HasActiveSession(gameObject))
+                    {
+                        currentRestInteractable = restTarget;
+                        Narrate("I'll rest here for a bit.", "rest-session-begin");
+                        ChangeState(AIState.Resting);
+                        return;
+                    }
+                }
+
                 Narrate("That worked.", "interact-complete");
             }
         }
@@ -1312,6 +1332,51 @@ public class SimpleNPCBrain : MonoBehaviour
 
         DebugPickup("Pickup declined because carried items were equal or better value.");
         return false;
+    }
+
+    private void HandleRestingState()
+    {
+        ResetStallTimer();
+        agent.ResetPath();
+
+        if (currentRestInteractable == null)
+        {
+            Narrate("I can't rest here anymore. I'll look elsewhere.", "rest-missing-interactable");
+            HandleNeedActionFailure();
+            return;
+        }
+
+        if (!currentRestInteractable.isEnabled || !currentRestInteractable.CanInteract(gameObject))
+        {
+            Narrate("This resting spot is no longer available.", "rest-interactable-unavailable");
+            StopRestingSession();
+            HandleNeedActionFailure();
+            return;
+        }
+
+        float recoveredThisTick = currentRestInteractable.RecoverForSeconds(gameObject, Time.deltaTime);
+        if (recoveredThisTick > 0f)
+        {
+            needsManager.ModifyNeed(currentRestInteractable.GetNeedType(), recoveredThisTick);
+        }
+
+        bool needRecoveredEnough = !needsManager.IsNeedUrgent(currentRestInteractable.GetNeedType());
+        bool sessionCapReached = currentRestInteractable.IsSessionExhausted();
+
+        if (!needRecoveredEnough && !sessionCapReached)
+            return;
+
+        if (needRecoveredEnough)
+            Narrate("That rest helped. I can keep going.", "rest-complete-satisfied");
+        else
+            Narrate("I've gotten all I can from this spot.", "rest-complete-cap-reached");
+
+        StopRestingSession();
+
+        if (currentNeedActionIsUrgentDriven && HasUrgentNeed())
+            ChangeState(AIState.Explore);
+        else
+            ChangeState(AIState.IdleWander);
     }
 
     private bool TryUseInventoryItemForNeed(NeedType needType)
@@ -1455,6 +1520,7 @@ public class SimpleNPCBrain : MonoBehaviour
     {
         DebugAbort("AbortCurrentNeedAction");
 
+        StopRestingSession();
         ResetStallTimer();
         currentTarget = null;
         currentMemoryTarget = null;
@@ -1471,6 +1537,7 @@ public class SimpleNPCBrain : MonoBehaviour
 
     private void RestartNeedSearch()
     {
+        StopRestingSession();
         ResetStallTimer();
         currentTarget = null;
         currentMemoryTarget = null;
@@ -1483,6 +1550,15 @@ public class SimpleNPCBrain : MonoBehaviour
         hasIdlePoint = false;
         agent.ResetPath();
         ChangeState(AIState.Explore);
+    }
+
+    private void StopRestingSession()
+    {
+        if (currentRestInteractable == null)
+            return;
+
+        currentRestInteractable.EndRestSession(gameObject);
+        currentRestInteractable = null;
     }
 
     private float GetNeedMoveSpeed()
@@ -1528,6 +1604,11 @@ public class SimpleNPCBrain : MonoBehaviour
                 hasExplorePoint = false;
                 exploreTimer = 0f;
                 exploreRecheckTimer = 0f;
+                break;
+
+            case AIState.Resting:
+                if (agent.hasPath)
+                    agent.ResetPath();
                 break;
         }
 
@@ -1907,6 +1988,11 @@ public class SimpleNPCBrain : MonoBehaviour
                         return "This is bad. I need food now.";
                     return "I'm starting to get hungry.";
 
+                case NeedType.Energy:
+                    if (currentBand == NeedsManager.NeedUrgencyBand.Critical)
+                        return "I'm exhausted. I need to rest now.";
+                    return "I'm getting tired.";
+
                 default:
                     return "I need to deal with this soon.";
             }
@@ -1950,6 +2036,12 @@ public class SimpleNPCBrain : MonoBehaviour
                 return Pick(
                     "Let's try this.",
                     "This should help."
+                );
+
+            case AIState.Resting:
+                return Pick(
+                    "Time to recover for a moment.",
+                    "I'll rest until I feel better."
                 );
 
             default:
