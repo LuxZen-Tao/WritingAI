@@ -114,6 +114,49 @@ public class NPCInventory : MonoBehaviour
         return true;
     }
 
+    public bool TryMoveHandItemToInventory()
+    {
+        if (handItem == null || IsFull)
+            return false;
+
+        Interactable previousHandItem = handItem;
+        handItem = null;
+
+        DetachItemFromHand(previousHandItem);
+        previousHandItem.gameObject.SetActive(false);
+        items.Add(previousHandItem);
+        return true;
+    }
+
+    public bool TryMoveInventoryItemToHand(Interactable item)
+    {
+        if (item == null || handItem != null || !items.Contains(item))
+            return false;
+
+        items.Remove(item);
+        handItem = item;
+        AttachItemToHand(handItem);
+        return true;
+    }
+
+    public bool TrySwapHandItemWithInventoryItem(Interactable pocketItem)
+    {
+        if (pocketItem == null || handItem == null || !items.Contains(pocketItem))
+            return false;
+
+        Interactable previousHandItem = handItem;
+        items.Remove(pocketItem);
+
+        handItem = null;
+        DetachItemFromHand(previousHandItem);
+        previousHandItem.gameObject.SetActive(false);
+        items.Add(previousHandItem);
+
+        handItem = pocketItem;
+        AttachItemToHand(handItem);
+        return true;
+    }
+
     public void ClearHandItem()
     {
         if (handItem == null)
@@ -204,16 +247,17 @@ public class NPCInventory : MonoBehaviour
         Interactable leastValuable = null;
         float lowestValue = float.MaxValue;
 
+        if (handItem != null && TryGetPickupableValue(handItem, out float handValue))
+        {
+            leastValuable = handItem;
+            lowestValue = handValue;
+        }
+
         for (int i = 0; i < items.Count; i++)
         {
-            if (items[i] == null)
+            if (!TryGetPickupableValue(items[i], out float value))
                 continue;
 
-            IPickupable pickupable = items[i] as IPickupable;
-            if (pickupable == null)
-                continue;
-
-            float value = pickupable.GetItemValue();
             if (value < lowestValue)
             {
                 lowestValue = value;
@@ -226,6 +270,10 @@ public class NPCInventory : MonoBehaviour
 
     public bool HasItemForNeed(NeedType needType)
     {
+        INeedSatisfier handSatisfier = handItem as INeedSatisfier;
+        if (handSatisfier != null && handSatisfier.GetNeedType() == needType)
+            return true;
+
         for (int i = 0; i < items.Count; i++)
         {
             if (items[i] == null)
@@ -243,6 +291,13 @@ public class NPCInventory : MonoBehaviour
     {
         Interactable best = null;
         float bestValue = -1f;
+
+        INeedSatisfier handSatisfier = handItem as INeedSatisfier;
+        if (handSatisfier != null && handSatisfier.GetNeedType() == needType)
+        {
+            best = handItem;
+            bestValue = handSatisfier.GetNeedValue();
+        }
 
         for (int i = 0; i < items.Count; i++)
         {
@@ -271,6 +326,13 @@ public class NPCInventory : MonoBehaviour
         if (string.IsNullOrWhiteSpace(lockId))
             return false;
 
+        IKeyItem handKeyItem = handItem as IKeyItem;
+        if (handKeyItem != null && DoorController.KeyIdsMatch(lockId, handKeyItem.GetKeyId()))
+        {
+            matchingKey = handKeyItem;
+            return true;
+        }
+
         for (int i = 0; i < items.Count; i++)
         {
             if (items[i] == null)
@@ -288,5 +350,20 @@ public class NPCInventory : MonoBehaviour
         }
 
         return false;
+    }
+
+    private bool TryGetPickupableValue(Interactable item, out float value)
+    {
+        value = 0f;
+
+        if (item == null)
+            return false;
+
+        IPickupable pickupable = item as IPickupable;
+        if (pickupable == null)
+            return false;
+
+        value = pickupable.GetItemValue();
+        return true;
     }
 }
