@@ -142,6 +142,9 @@ public class SimpleNPCBrain : MonoBehaviour
     private float currentRestSessionElapsed = 0f;
     private float currentRestMinimumDuration = 0f;
     private float currentRestMaximumDuration = 0f;
+    private float currentRestHoldTime = 0f;
+    private Transform currentRestAnchor;
+    private float currentRestAnchorSnapDistance = 0.35f;
 
     private readonly Dictionary<NeedType, NeedsManager.NeedUrgencyBand> lastNeedBands = new Dictionary<NeedType, NeedsManager.NeedUrgencyBand>();
     private readonly Dictionary<NeedType, bool> lastNeedUrgentFlags = new Dictionary<NeedType, bool>();
@@ -216,6 +219,9 @@ public class SimpleNPCBrain : MonoBehaviour
 
             if (needChanged && IsGoalExecutionState(currentState))
             {
+                if (currentState == AIState.Resting)
+                    return;
+
                 Narrate(Pick(
                     "Something else is more urgent now. I need to switch priorities.",
                     "Hold on... another need just got worse. Changing course."
@@ -228,6 +234,9 @@ public class SimpleNPCBrain : MonoBehaviour
             {
                 if (IsGoalExecutionState(currentState))
                 {
+                    if (currentState == AIState.Resting)
+                        return;
+
                     Narrate(Pick(
                         "Okay, that's better.",
                         "Much better. I can ease off now."
@@ -1252,8 +1261,12 @@ public class SimpleNPCBrain : MonoBehaviour
                     {
                         currentRestInteractable = restTarget;
                         currentRestSessionElapsed = 0f;
-                        currentRestMinimumDuration = restTarget.MinimumRestDuration;
+                        currentRestHoldTime = restTarget.MinimumHoldTime;
+                        currentRestMinimumDuration = Mathf.Max(restTarget.MinimumRestDuration, currentRestHoldTime);
                         currentRestMaximumDuration = restTarget.MaximumRestDuration;
+                        currentRestAnchor = restTarget.RestAnchor;
+                        currentRestAnchorSnapDistance = restTarget.AnchorSnapDistance;
+                        CommitToRestAnchor(true);
                         Narrate("I'll rest here for a bit.", "rest-session-begin");
                         ChangeState(AIState.Resting);
                         return;
@@ -1376,6 +1389,7 @@ public class SimpleNPCBrain : MonoBehaviour
             return;
         }
 
+        CommitToRestAnchor(false);
         currentRestSessionElapsed += Time.deltaTime;
 
         float recoveredThisTick = currentRestInteractable.RecoverForSeconds(gameObject, Time.deltaTime);
@@ -1597,6 +1611,35 @@ public class SimpleNPCBrain : MonoBehaviour
         currentRestSessionElapsed = 0f;
         currentRestMinimumDuration = 0f;
         currentRestMaximumDuration = 0f;
+        currentRestHoldTime = 0f;
+        currentRestAnchor = null;
+        currentRestAnchorSnapDistance = 0.35f;
+    }
+
+    private void CommitToRestAnchor(bool forceSnap)
+    {
+        if (currentRestInteractable == null)
+            return;
+
+        Transform anchor = currentRestAnchor != null ? currentRestAnchor : currentRestInteractable.RestAnchor;
+        if (anchor == null)
+            return;
+
+        Vector3 anchorPosition = anchor.position;
+        float distanceToAnchor = Vector3.Distance(transform.position, anchorPosition);
+        float snapDistance = Mathf.Max(0.01f, currentRestAnchorSnapDistance);
+        if (forceSnap || distanceToAnchor > snapDistance)
+        {
+            if (!agent.Warp(anchorPosition))
+                transform.position = anchorPosition;
+        }
+        else
+        {
+            transform.position = anchorPosition;
+        }
+
+        if (agent.hasPath)
+            agent.ResetPath();
     }
 
     private float GetNeedMoveSpeed()
