@@ -2,5 +2,6 @@
 {
 	Comfort,
 	Hunger,
+	Energy,
 	Key
 }
