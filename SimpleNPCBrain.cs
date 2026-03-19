@@ -918,27 +918,17 @@ public class SimpleNPCBrain : MonoBehaviour
             if (!CanSeeInteractable(interactable))
                 continue;
 
-            IKeyItem keyItem = interactable as IKeyItem;
-            if (keyItem != null)
+            // --- KEYS (important: must come BEFORE need satisfiers) ---
+            if (interactable is IKeyItem && interactable is IPickupable pickupable && pickupable.CanPickUp(gameObject))
             {
-                RememberInteractable(interactable, NeedType.Comfort);
+                RememberInteractable(interactable, NeedType.Comfort); // temp reuse
                 continue;
             }
 
-            INeedSatisfier satisfier = interactable as INeedSatisfier;
-            if (satisfier != null)
+            // --- NORMAL NEED ITEMS ---
+            if (interactable is INeedSatisfier satisfier)
             {
                 RememberInteractable(interactable, satisfier.GetNeedType());
-                continue;
-            }
-
-            // Remember keys so they can be retrieved later for locked doors.
-            IKeyItem keyItem = interactable as IKeyItem;
-            if (keyItem != null)
-            {
-                IPickupable pickupable = interactable as IPickupable;
-                if (pickupable != null && pickupable.CanPickUp(gameObject))
-                    RememberInteractable(interactable, NeedType.Key);
             }
         }
     }
