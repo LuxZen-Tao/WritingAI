@@ -120,6 +120,7 @@ public class SimpleNPCBrain : MonoBehaviour
 
     [Header("Hand Item Presentation")]
     [SerializeField] private float handPreUseHoldDuration = 0.5f;
+    [SerializeField] private float handDrawReadableDelay = 0.2f;
     [SerializeField] private float handPostUseVisibleDelay = 0.4f;
     [SerializeField] private float idleHandPocketDelay = 1.5f;
 
