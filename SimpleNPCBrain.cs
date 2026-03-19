@@ -1794,7 +1794,17 @@ public class SimpleNPCBrain : MonoBehaviour
             return true;
         }
 
-        if (Time.time < lastDoorInteractTime + doorInteractCooldown)
+        pendingDoorTarget = door;
+        pendingDoorDestination = destination;
+        hasPendingDoorDestination = true;
+        agent.ResetPath();
+        ResetStallTimer();
+        return true;
+    }
+
+    private bool HandlePendingDoorTarget()
+    {
+        if (pendingDoorTarget == null)
             return false;
 
         QueueDoorHandling(door, destination);
@@ -1805,6 +1815,39 @@ public class SimpleNPCBrain : MonoBehaviour
     {
         if (pendingDoorTarget == null)
             return false;
+        }
+
+        if (controller.IsOpen)
+        {
+            pendingDoorTarget = null;
+            Vector3 repathDestination = hasPendingDoorDestination ? pendingDoorDestination : transform.position;
+            hasPendingDoorDestination = false;
+            agent.ResetPath();
+            agent.SetDestination(repathDestination);
+            ResetStallTimer();
+            return true;
+        }
+
+        Vector3 doorPoint = pendingDoorTarget.GetInteractionPoint();
+        agent.speed = GetNeedMoveSpeed();
+        agent.SetDestination(doorPoint);
+
+        if (!agent.pathPending && agent.remainingDistance <= Mathf.Max(doorStopDistance, pendingDoorTarget.interactionRange))
+        {
+            if (Time.time < lastDoorInteractTime + doorInteractCooldown)
+                return true;
+
+            if (!pendingDoorTarget.CanInteract(gameObject))
+            {
+                pendingDoorTarget = null;
+                hasPendingDoorDestination = false;
+                return false;
+            }
+
+            pendingDoorTarget.Interact(gameObject);
+            lastDoorInteractTime = Time.time;
+            ResetStallTimer();
+        }
 
         DoorController controller = pendingDoorTarget.GetDoorController();
         if (controller == null)
@@ -1856,6 +1899,7 @@ public class SimpleNPCBrain : MonoBehaviour
         hasPendingDoorDestination = true;
         agent.ResetPath();
         ResetStallTimer();
+        return true;
     }
 
     private void RepathCurrentMovementDestination()
