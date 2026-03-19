@@ -52,8 +52,7 @@ public class NPCInventory : MonoBehaviour
     {
         if (item != null && handItem == item)
         {
-            DetachItemFromHand(handItem);
-            handItem = null;
+            ClearHandItem();
             return;
         }
 
