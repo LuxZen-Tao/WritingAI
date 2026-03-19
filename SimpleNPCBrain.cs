@@ -58,6 +58,9 @@ public class SimpleNPCBrain : MonoBehaviour
 
     [Header("Opportunistic Needs")]
     public float opportunisticTargetMaxDistance = 2.5f;
+    [Header("Opportunistic Check")]
+    public float opportunisticCheckInterval = 0.5f;
+    private float opportunisticCheckTimer = 0f;
 
     [Header("Idle Wander")]
     public float idleWanderRadius = 3f;
@@ -65,6 +68,11 @@ public class SimpleNPCBrain : MonoBehaviour
     public float idlePauseDuration = 2f;
     public float minimumIdleMoveDistance = 0.5f;
     public float roomPointInset = 0.2f;
+
+    [Header("Idle Door Checking")]
+    public float idleDoorSearchRadius = 2f;
+    public float idleDoorSearchCooldown = 1f;
+    private float lastIdleDoorSearchTime = -999f;
 
     [Header("Memory - Interactables")]
     public List<RememberedInteractable> memory = new List<RememberedInteractable>();
@@ -155,8 +163,9 @@ public class SimpleNPCBrain : MonoBehaviour
         currentState = AIState.IdleWander;
         hasIdlePoint = false;
         idlePauseTimer = idlePauseDuration;
-
-        Narrate("Everything seems fine. I'll just wander for now.", "state-idle-start");
+        opportunisticCheckTimer = Random.Range(0f, opportunisticCheckInterval);
+        
+        Narrate("What a beautiful day! Let's go for a wander 😊.", "state-idle-start");
     }
 
     private void Update()
@@ -212,8 +221,15 @@ public class SimpleNPCBrain : MonoBehaviour
         }
         else if (currentState == AIState.IdleWander)
         {
-            if (TryHandleOpportunisticNeed())
-                return;
+            opportunisticCheckTimer -= Time.deltaTime;
+
+            if (opportunisticCheckTimer <= 0f)
+            {
+                opportunisticCheckTimer = opportunisticCheckInterval;
+
+                if (TryHandleOpportunisticNeed())
+                    return;
+            }
         }
 
         switch (currentState)
@@ -277,6 +293,11 @@ public class SimpleNPCBrain : MonoBehaviour
         return IsGoalExecutionState(state);
     }
 
+    private float GetActionMoveSpeed()
+    {
+        return currentNeedActionIsUrgentDriven ? GetNeedMoveSpeed() : idleMoveSpeed;
+    }
+
     private void HandleIdleWander()
     {
         ResetStallTimer();
@@ -320,11 +341,18 @@ public class SimpleNPCBrain : MonoBehaviour
 
         if (!agent.pathPending && agent.remainingDistance <= idleWanderStopDistance)
         {
-            hasIdlePoint = false;
-            idlePauseTimer = idlePauseDuration;
-
             if (agent.hasPath)
                 agent.ResetPath();
+
+            hasIdlePoint = false;
+
+            if (TryHandleNearbyIdleDoor())
+            {
+                idlePauseTimer = 0.25f;
+                return;
+            }
+
+            idlePauseTimer = idlePauseDuration;
         }
     }
 
@@ -370,7 +398,7 @@ public class SimpleNPCBrain : MonoBehaviour
                 return;
         }
 
-        agent.speed = GetNeedMoveSpeed();
+        agent.speed = GetActionMoveSpeed();
         exploreTimer += Time.deltaTime;
 
         if (!hasExplorePoint)
@@ -991,7 +1019,7 @@ public class SimpleNPCBrain : MonoBehaviour
             return;
         }
 
-        agent.speed = GetNeedMoveSpeed();
+        agent.speed = GetActionMoveSpeed();
         Vector3 targetPosition = currentTarget.GetInteractionPoint();
         agent.SetDestination(targetPosition);
 
@@ -1040,7 +1068,7 @@ public class SimpleNPCBrain : MonoBehaviour
                 return;
             }
 
-            agent.speed = GetNeedMoveSpeed();
+            agent.speed = GetActionMoveSpeed();
             agent.SetDestination(currentComfortZoneTarget.lastKnownPosition);
 
             if (IsStalled())
@@ -1084,7 +1112,7 @@ public class SimpleNPCBrain : MonoBehaviour
         if (TryAcquireVisibleTarget(currentNeedType))
             return;
 
-        agent.speed = GetNeedMoveSpeed();
+        agent.speed = GetActionMoveSpeed();
         agent.SetDestination(currentMemoryTarget.lastKnownPosition);
 
         if (IsStalled())
@@ -1442,6 +1470,95 @@ public class SimpleNPCBrain : MonoBehaviour
         return true;
     }
 
+    private bool TryHandleNearbyIdleDoor()
+    {
+        if (Time.time < lastIdleDoorSearchTime + idleDoorSearchCooldown)
+            return false;
+
+        lastIdleDoorSearchTime = Time.time;
+
+        int mask = doorLayer.value == 0 ? interactableLayer : doorLayer;
+        Collider[] hits = Physics.OverlapSphere(transform.position, idleDoorSearchRadius, mask, QueryTriggerInteraction.Collide);
+
+        DoorInteractable bestDoor = null;
+        float bestDistance = Mathf.Infinity;
+
+        for (int i = 0; i < hits.Length; i++)
+        {
+            DoorInteractable door = hits[i].GetComponentInParent<DoorInteractable>();
+            if (door == null)
+                continue;
+
+            if (!door.isEnabled)
+                continue;
+
+            if (!door.CanInteract(gameObject))
+                continue;
+
+            float distance = Vector3.Distance(transform.position, door.GetInteractionPoint());
+            if (distance >= bestDistance)
+                continue;
+
+            bestDistance = distance;
+            bestDoor = door;
+        }
+
+        if (bestDoor == null)
+            return false;
+
+        DoorController controller = bestDoor.GetDoorController();
+        if (controller == null)
+            return false;
+
+        if (controller.IsOpen)
+            return false;
+
+        if (TryUnlockAndOpenDoorFromInventory(bestDoor))
+        {
+            Narrate("I can open this door. That gives me more room to wander.", "idle-door-opened");
+            return true;
+        }
+
+        return false;
+    }
+
+    private bool TryUnlockAndOpenDoorFromInventory(DoorInteractable door)
+    {
+        if (door == null)
+            return false;
+
+        DoorController controller = door.GetDoorController();
+        if (controller == null)
+            return false;
+
+        if (controller.IsOpen)
+            return false;
+
+        door.Interact(gameObject);
+
+        if (controller.IsOpen)
+            return true;
+
+        if (npcInventory == null)
+            return false;
+
+        if (TryUseInventoryKeyOnDoor(door))
+        {
+            door.Interact(gameObject);
+            return controller.IsOpen;
+        }
+
+        return false;
+    }
+
+    private bool TryUseInventoryKeyOnDoor(DoorInteractable door)
+    {
+        if (door == null || npcInventory == null)
+            return false;
+
+        return false;
+    }
+
     private void OnTriggerEnter(Collider other)
     {
         RoomArea room = other.GetComponentInParent<RoomArea>();
@@ -1526,7 +1643,7 @@ public class SimpleNPCBrain : MonoBehaviour
     {
         Vector3 origin = eyePoint != null ? eyePoint.position : transform.position + Vector3.up * 1.5f;
 
-        Gizmos.color = Color.yellow;
+        Gizmos.color = new Color(1f, 0.78f, 0.94f);
         Gizmos.DrawWireSphere(transform.position, visionRange);
 
         Vector3 leftBoundary = Quaternion.Euler(0f, -visionAngle * 0.5f, 0f) * transform.forward;
@@ -1559,10 +1676,16 @@ public class SimpleNPCBrain : MonoBehaviour
 
         if (currentComfortZoneTarget != null)
         {
-            Gizmos.color = Color.blue;
+            Gizmos.color = new Color(0f, 1f, 0.99f);
             Gizmos.DrawSphere(currentComfortZoneTarget.lastKnownPosition, 0.25f);
             Gizmos.DrawLine(transform.position, currentComfortZoneTarget.lastKnownPosition);
         }
+
+        Gizmos.color = new Color(0.02f, 0.22f, 1f, 0.8f);
+        Gizmos.DrawWireSphere(transform.position, idleDoorSearchRadius);
+        
+        Gizmos.color = new Color(1f, 0.78f, 0f, 0.9f);
+        Gizmos.DrawWireSphere(transform.position, opportunisticTargetMaxDistance);
     }
 
     private void EnsureThoughtLogger()
@@ -1695,64 +1818,102 @@ public class SimpleNPCBrain : MonoBehaviour
     }
 
     private bool TryHandleOpportunisticNeed()
+{
+    if (needsManager == null || needsManager.needs == null)
     {
-        if (needsManager == null || needsManager.needs == null)
-            return false;
+        DebugFlow("Opportunistic check aborted: needsManager or needs list is null.");
+        return false;
+    }
 
-        if (needsManager.HasUrgentNeed())
-            return false;
+    if (needsManager.HasUrgentNeed())
+    {
+        DebugFlow("Opportunistic check aborted: urgent need exists.");
+        return false;
+    }
 
-        NeedType bestNeed = NeedType.Comfort;
-        float bestScore = float.MinValue;
-        bool foundOpportunity = false;
+    DebugFlow("Opportunistic check started.");
 
-        for (int i = 0; i < needsManager.needs.Count; i++)
+    NeedType bestNeed = NeedType.Comfort;
+    float bestScore = float.MinValue;
+    bool foundOpportunity = false;
+
+    for (int i = 0; i < needsManager.needs.Count; i++)
+    {
+        NeedsManager.NeedState need = needsManager.needs[i];
+        if (need == null)
         {
-            NeedsManager.NeedState need = needsManager.needs[i];
-            if (need == null)
-                continue;
-
-            NeedType needType = need.needType;
-            if (!needsManager.ShouldOpportunisticallySatisfy(needType))
-                continue;
-
-            if (!HasEasyVisibleOpportunity(needType))
-                continue;
-
-            float score = needsManager.GetNeedPriorityScore(needType);
-            if (score <= bestScore)
-                continue;
-
-            bestNeed = needType;
-            bestScore = score;
-            foundOpportunity = true;
+            DebugFlow("Opportunistic check: skipped null need entry.");
+            continue;
         }
 
-        if (!foundOpportunity)
-            return false;
+        NeedType needType = need.needType;
+        DebugFlow("Opportunistic check: evaluating need " + needType);
 
-        currentNeedType = bestNeed;
-        currentNeedActionIsUrgentDriven = false;
-
-        DebugFlow("Opportunistic target selected for need: " + bestNeed);
-
-        if (bestNeed == NeedType.Comfort)
+        if (!needsManager.ShouldOpportunisticallySatisfy(needType))
         {
-            if (TryMoveToVisibleComfortZone(opportunisticTargetMaxDistance))
-            {
-                Narrate("That nearby lit area could help a little.", "opportunity-comfort-room");
-                return true;
-            }
+            DebugFlow("Opportunistic check: rejected " + needType + " because ShouldOpportunisticallySatisfy returned false.");
+            continue;
         }
 
-        if (TryAcquireVisibleTarget(bestNeed, opportunisticTargetMaxDistance))
+        if (!HasEasyVisibleOpportunity(needType))
         {
-            Narrate("Easy opportunity. I'll handle this quickly.", "opportunity-interactable");
+            DebugFlow("Opportunistic check: rejected " + needType + " because no easy visible opportunity was found within range " + opportunisticTargetMaxDistance);
+            continue;
+        }
+
+        float score = needsManager.GetNeedPriorityScore(needType);
+        DebugFlow("Opportunistic check: " + needType + " has visible opportunity with priority score " + score);
+
+        if (score <= bestScore)
+        {
+            DebugFlow("Opportunistic check: " + needType + " lost to current best score " + bestScore);
+            continue;
+        }
+
+        bestNeed = needType;
+        bestScore = score;
+        foundOpportunity = true;
+
+        DebugFlow("Opportunistic check: " + needType + " is the new best opportunistic need.");
+    }
+
+    if (!foundOpportunity)
+    {
+        DebugFlow("Opportunistic check finished: no valid opportunity selected.");
+        return false;
+    }
+
+    currentNeedType = bestNeed;
+    currentNeedActionIsUrgentDriven = false;
+
+    DebugFlow("Opportunistic target selected for need: " + bestNeed + " with score " + bestScore);
+
+    if (bestNeed == NeedType.Comfort)
+    {
+        DebugFlow("Opportunistic action: trying visible comfort zone within range " + opportunisticTargetMaxDistance);
+
+        if (TryMoveToVisibleComfortZone(opportunisticTargetMaxDistance))
+        {
+            DebugFlow("Opportunistic action: comfort zone move succeeded.");
+            Narrate("That nearby lit area could help a little.", "opportunity-comfort-room");
             return true;
         }
 
-        return false;
+        DebugFlow("Opportunistic action: comfort zone move failed.");
     }
+
+    DebugFlow("Opportunistic action: trying visible target for need " + bestNeed + " within range " + opportunisticTargetMaxDistance);
+
+    if (TryAcquireVisibleTarget(bestNeed, opportunisticTargetMaxDistance))
+    {
+        DebugFlow("Opportunistic action: visible target acquisition succeeded for need " + bestNeed);
+        Narrate("Easy opportunity. I'll handle this quickly.", "opportunity-interactable");
+        return true;
+    }
+
+    DebugFlow("Opportunistic action: visible target acquisition failed for need " + bestNeed);
+    return false;
+}
 
     private bool HasEasyVisibleOpportunity(NeedType needType)
     {
@@ -1766,39 +1927,86 @@ public class SimpleNPCBrain : MonoBehaviour
     }
 
     private bool TryFindBestVisibleTarget(NeedType needType, float maxDistance, out Interactable bestTarget, out float bestDistance)
+{
+    Collider[] hits = Physics.OverlapSphere(transform.position, visionRange, interactableLayer);
+
+    DebugFlow($"[FindTarget] Start search for {needType} | Hits found: {hits.Length} | visionRange: {visionRange} | maxDistance: {maxDistance}");
+
+    bestTarget = null;
+    bestDistance = Mathf.Infinity;
+
+    foreach (Collider hit in hits)
     {
-        Collider[] hits = Physics.OverlapSphere(transform.position, visionRange, interactableLayer);
+        Interactable interactable = hit.GetComponentInParent<Interactable>();
 
-        bestTarget = null;
-        bestDistance = Mathf.Infinity;
-
-        foreach (Collider hit in hits)
+        if (interactable == null)
         {
-            Interactable interactable = hit.GetComponentInParent<Interactable>();
-
-            if (interactable == null || !interactable.isEnabled)
-                continue;
-
-            if (!CanSeeInteractable(interactable))
-                continue;
-
-            INeedSatisfier satisfier = interactable as INeedSatisfier;
-            if (satisfier == null || satisfier.GetNeedType() != needType)
-                continue;
-
-            if (!interactable.CanInteract(gameObject))
-                continue;
-
-            float distance = Vector3.Distance(transform.position, interactable.GetInteractionPoint());
-            if (distance > maxDistance || distance >= bestDistance)
-                continue;
-
-            bestDistance = distance;
-            bestTarget = interactable;
+            DebugFlow("[FindTarget] Skipped: no Interactable on collider " + hit.name);
+            continue;
         }
 
-        return bestTarget != null;
+        DebugFlow($"[FindTarget] Checking: {interactable.name}");
+
+        if (!interactable.isEnabled)
+        {
+            DebugFlow($"[FindTarget] Rejected {interactable.name}: isEnabled = false");
+            continue;
+        }
+
+        if (!CanSeeInteractable(interactable))
+        {
+            DebugFlow($"[FindTarget] Rejected {interactable.name}: cannot see (vision/angle/obstruction)");
+            continue;
+        }
+
+        INeedSatisfier satisfier = interactable as INeedSatisfier;
+        if (satisfier == null)
+        {
+            DebugFlow($"[FindTarget] Rejected {interactable.name}: not INeedSatisfier");
+            continue;
+        }
+
+        if (satisfier.GetNeedType() != needType)
+        {
+            DebugFlow($"[FindTarget] Rejected {interactable.name}: wrong need type ({satisfier.GetNeedType()} != {needType})");
+            continue;
+        }
+
+        if (!interactable.CanInteract(gameObject))
+        {
+            DebugFlow($"[FindTarget] Rejected {interactable.name}: CanInteract returned false");
+            continue;
+        }
+
+        float distance = Vector3.Distance(transform.position, interactable.GetInteractionPoint());
+
+        if (distance > maxDistance)
+        {
+            DebugFlow($"[FindTarget] Rejected {interactable.name}: too far ({distance} > {maxDistance})");
+            continue;
+        }
+
+        if (distance >= bestDistance)
+        {
+            DebugFlow($"[FindTarget] Rejected {interactable.name}: not closer than current best ({distance} >= {bestDistance})");
+            continue;
+        }
+
+        DebugFlow($"[FindTarget] Candidate accepted: {interactable.name} at distance {distance}");
+
+        bestDistance = distance;
+        bestTarget = interactable;
     }
+
+    if (bestTarget != null)
+    {
+        DebugFlow($"[FindTarget] SUCCESS: Selected {bestTarget.name} at distance {bestDistance}");
+        return true;
+    }
+
+    DebugFlow($"[FindTarget] FAILED: No valid target found for {needType}");
+    return false;
+}
 
     private bool TryFindBestVisibleComfortRoom(float maxDistance, out RoomArea bestRoom, out float bestDistance)
     {
@@ -1945,7 +2153,7 @@ public class SimpleNPCBrain : MonoBehaviour
         }
 
         Vector3 doorPoint = pendingDoorTarget.GetInteractionPoint();
-        agent.speed = GetNeedMoveSpeed();
+        agent.speed = GetActionMoveSpeed();
         agent.SetDestination(doorPoint);
 
         if (!agent.pathPending && agent.remainingDistance <= Mathf.Max(doorStopDistance, pendingDoorTarget.interactionRange))
