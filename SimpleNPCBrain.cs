@@ -119,6 +119,10 @@ public class SimpleNPCBrain : MonoBehaviour
     private readonly NpcMemoryService memoryService = new NpcMemoryService();
 
     private NavMeshAgent agent;
+    
+    private Vector3 currentRestAnchorPosition;
+    private bool hasRestAnchor = false;
+    private float currentRestHoldTimer = 0f;
 
     private float exploreTimer = 0f;
     private float idlePauseTimer = 0f;
@@ -198,104 +202,104 @@ public class SimpleNPCBrain : MonoBehaviour
     }
 
     private void Update()
+{
+    needsManager.TickNeeds(IsCurrentAreaLit(), Time.deltaTime);
+    ObserveNeedShifts();
+
+    CleanupLocationMemory();
+    CleanupInteractableMemory();
+    CleanupComfortZoneMemory();
+    CleanupLockedDoorMemory();
+    RunInvariantChecks();
+
+    PassiveObserveVisibleInteractables();
+    PassiveObserveVisibleComfortZones();
+
+    if (needsManager.HasUrgentNeed(out NeedType mostUrgentNeed))
     {
-        needsManager.TickNeeds(IsCurrentAreaLit(), Time.deltaTime);
-        ObserveNeedShifts();
+        bool needChanged = mostUrgentNeed != currentNeedType;
 
-        CleanupLocationMemory();
-        CleanupInteractableMemory();
-        CleanupComfortZoneMemory();
-        CleanupLockedDoorMemory();
-        RunInvariantChecks();
-
-        PassiveObserveVisibleInteractables();
-        PassiveObserveVisibleComfortZones();
-
-        if (needsManager.HasUrgentNeed(out NeedType mostUrgentNeed))
+        // Do not replace the active need while currently resting.
+        if (!(currentState == AIState.Resting && currentRestInteractable != null))
         {
-            bool needChanged = mostUrgentNeed != currentNeedType;
             currentNeedType = mostUrgentNeed;
-            currentNeedActionIsUrgentDriven = true;
+        }
 
-            if (needChanged && IsGoalExecutionState(currentState))
+        currentNeedActionIsUrgentDriven = true;
+
+        if (needChanged && IsGoalExecutionState(currentState) && currentState != AIState.Resting)
+        {
+            Narrate(Pick(
+                "Something else is more urgent now. I need to switch priorities.",
+                "Hold on... another need just got worse. Changing course."
+            ), "need-switch-priority");
+            RestartNeedSearch();
+            return;
+        }
+
+        if (currentNeedActionIsUrgentDriven && IsNeedCurrentlySatisfied(currentNeedType))
+        {
+            if (IsGoalExecutionState(currentState) && currentState != AIState.Resting)
             {
-                if (currentState == AIState.Resting)
-                    return;
-
                 Narrate(Pick(
-                    "Something else is more urgent now. I need to switch priorities.",
-                    "Hold on... another need just got worse. Changing course."
-                ), "need-switch-priority");
-                RestartNeedSearch();
+                    "Okay, that's better.",
+                    "Much better. I can ease off now."
+                ), "need-satisfied-in-action");
+                AbortCurrentNeedAction();
                 return;
             }
-
-            if (currentNeedActionIsUrgentDriven && IsNeedCurrentlySatisfied(currentNeedType))
-            {
-                if (IsGoalExecutionState(currentState))
-                {
-                    if (currentState == AIState.Resting)
-                        return;
-
-                    Narrate(Pick(
-                        "Okay, that's better.",
-                        "Much better. I can ease off now."
-                    ), "need-satisfied-in-action");
-                    AbortCurrentNeedAction();
-                    return;
-                }
-            }
-            else if (currentState == AIState.IdleWander)
-            {
-                ChangeState(AIState.Explore);
-            }
-        }
-        else if (currentNeedActionIsUrgentDriven && IsGoalExecutionState(currentState))
-        {
-            Narrate("I feel okay again. Back to wandering.", "return-to-idle-no-urgent");
-            AbortCurrentNeedAction();
-            return;
         }
         else if (currentState == AIState.IdleWander)
         {
-            opportunisticCheckTimer -= Time.deltaTime;
-
-            if (opportunisticCheckTimer <= 0f)
-            {
-                opportunisticCheckTimer = opportunisticCheckInterval;
-
-                if (TryHandleOpportunisticNeed())
-                    return;
-            }
-        }
-
-        switch (currentState)
-        {
-            case AIState.IdleWander:
-                HandleIdleWander();
-                break;
-
-            case AIState.Explore:
-                ExploreForTarget();
-                break;
-
-            case AIState.MoveToTarget:
-                MoveToCurrentTarget();
-                break;
-
-            case AIState.MoveToRememberedTarget:
-                MoveToRememberedTarget();
-                break;
-
-            case AIState.InteractWithTarget:
-                InteractWithCurrentTarget();
-                break;
-
-            case AIState.Resting:
-                HandleRestingState();
-                break;
+            ChangeState(AIState.Explore);
         }
     }
+    else if (currentNeedActionIsUrgentDriven && IsGoalExecutionState(currentState) && currentState != AIState.Resting)
+    {
+        Narrate("I feel okay again. Back to wandering.", "return-to-idle-no-urgent");
+        AbortCurrentNeedAction();
+        return;
+    }
+    else if (currentState == AIState.IdleWander)
+    {
+        opportunisticCheckTimer -= Time.deltaTime;
+
+        if (opportunisticCheckTimer <= 0f)
+        {
+            opportunisticCheckTimer = opportunisticCheckInterval;
+
+            if (TryHandleOpportunisticNeed())
+                return;
+        }
+    }
+
+    switch (currentState)
+    {
+        case AIState.IdleWander:
+            HandleIdleWander();
+            break;
+
+        case AIState.Explore:
+            ExploreForTarget();
+            break;
+
+        case AIState.MoveToTarget:
+            MoveToCurrentTarget();
+            break;
+
+        case AIState.MoveToRememberedTarget:
+            MoveToRememberedTarget();
+            break;
+
+        case AIState.InteractWithTarget:
+            InteractWithCurrentTarget();
+            break;
+
+        case AIState.Resting:
+            HandleRestingState();
+            break;
+    }
+}
 
     private bool IsCurrentAreaLit()
     {
@@ -1261,12 +1265,22 @@ public class SimpleNPCBrain : MonoBehaviour
                     {
                         currentRestInteractable = restTarget;
                         currentRestSessionElapsed = 0f;
-                        currentRestHoldTime = restTarget.MinimumHoldTime;
-                        currentRestMinimumDuration = Mathf.Max(restTarget.MinimumRestDuration, currentRestHoldTime);
+                        currentRestMinimumDuration = restTarget.MinimumRestDuration;
                         currentRestMaximumDuration = restTarget.MaximumRestDuration;
-                        currentRestAnchor = restTarget.RestAnchor;
-                        currentRestAnchorSnapDistance = restTarget.AnchorSnapDistance;
-                        CommitToRestAnchor(true);
+
+                        currentRestAnchorPosition = restTarget.RestAnchorPosition;
+                        hasRestAnchor = true;
+                        currentRestHoldTimer = restTarget.MinimumHoldTime;
+
+                        if (agent.hasPath)
+                            agent.ResetPath();
+
+                        float anchorDistance = Vector3.Distance(transform.position, currentRestAnchorPosition);
+                        if (anchorDistance > restTarget.AnchorSnapDistance)
+                        {
+                            agent.Warp(currentRestAnchorPosition);
+                        }
+
                         Narrate("I'll rest here for a bit.", "rest-session-begin");
                         ChangeState(AIState.Resting);
                         return;
@@ -1370,63 +1384,87 @@ public class SimpleNPCBrain : MonoBehaviour
     }
 
     private void HandleRestingState()
+{
+    ResetStallTimer();
+    agent.ResetPath();
+
+    if (currentRestInteractable == null)
     {
-        ResetStallTimer();
-        agent.ResetPath();
-
-        if (currentRestInteractable == null)
-        {
-            Narrate("I can't rest here anymore. I'll look elsewhere.", "rest-missing-interactable");
-            HandleNeedActionFailure();
-            return;
-        }
-
-        if (!currentRestInteractable.isEnabled || !currentRestInteractable.CanInteract(gameObject))
-        {
-            Narrate("This resting spot is no longer available.", "rest-interactable-unavailable");
-            StopRestingSession();
-            HandleNeedActionFailure();
-            return;
-        }
-
-        CommitToRestAnchor(false);
-        currentRestSessionElapsed += Time.deltaTime;
-
-        float recoveredThisTick = currentRestInteractable.RecoverForSeconds(gameObject, Time.deltaTime);
-        if (recoveredThisTick > 0f)
-        {
-            needsManager.ModifyNeed(currentRestInteractable.GetNeedType(), recoveredThisTick);
-        }
-
-        NeedType restNeedType = currentRestInteractable.GetNeedType();
-        bool minimumDurationSatisfied = currentRestSessionElapsed >= currentRestMinimumDuration;
-        bool maximumDurationReached = currentRestMaximumDuration > 0f && currentRestSessionElapsed >= currentRestMaximumDuration;
-        bool needRecoveredEnough = currentNeedActionIsUrgentDriven
-            ? !needsManager.IsNeedUrgent(restNeedType)
-            : !needsManager.ShouldOpportunisticallySatisfy(restNeedType);
-        bool sessionCapReached = currentRestInteractable.IsSessionExhausted();
-
-        bool shouldExitRest = maximumDurationReached ||
-                              (minimumDurationSatisfied && needRecoveredEnough) ||
-                              (minimumDurationSatisfied && sessionCapReached);
-
-        if (!shouldExitRest)
-            return;
-
-        if (maximumDurationReached)
-            Narrate("That's enough rest for now. Time to move again.", "rest-complete-max-duration");
-        else if (needRecoveredEnough)
-            Narrate("That rest helped. I can keep going.", "rest-complete-satisfied");
-        else
-            Narrate("I've gotten all I can from this spot.", "rest-complete-cap-reached");
-
-        StopRestingSession();
-
-        if (currentNeedActionIsUrgentDriven && HasUrgentNeed())
-            ChangeState(AIState.Explore);
-        else
-            ChangeState(AIState.IdleWander);
+        Narrate("I can't rest here anymore. I'll look elsewhere.", "rest-missing-interactable");
+        HandleNeedActionFailure();
+        return;
     }
+
+    if (!currentRestInteractable.isEnabled || !currentRestInteractable.CanInteract(gameObject))
+    {
+        Narrate("This resting spot is no longer available.", "rest-interactable-unavailable");
+        StopRestingSession();
+        HandleNeedActionFailure();
+        return;
+    }
+
+    NeedType restNeedType = currentRestInteractable.GetNeedType();
+
+    // Keep the active need aligned with the thing we're resting for.
+    currentNeedType = restNeedType;
+
+    // Hold the NPC at the anchor while resting.
+    if (hasRestAnchor)
+    {
+        float anchorDistance = Vector3.Distance(transform.position, currentRestAnchorPosition);
+
+        if (anchorDistance > 0.15f)
+        {
+            agent.Warp(currentRestAnchorPosition);
+        }
+    }
+
+    currentRestSessionElapsed += Time.deltaTime;
+    currentRestHoldTimer -= Time.deltaTime;
+
+    float recoveredThisTick = currentRestInteractable.RecoverForSeconds(gameObject, Time.deltaTime);
+    if (recoveredThisTick > 0f)
+    {
+        needsManager.ModifyNeed(restNeedType, recoveredThisTick);
+    }
+
+    bool minimumDurationSatisfied = currentRestSessionElapsed >= currentRestMinimumDuration;
+    bool holdSatisfied = currentRestHoldTimer <= 0f;
+    bool maximumDurationReached = currentRestMaximumDuration > 0f && currentRestSessionElapsed >= currentRestMaximumDuration;
+
+    bool needRecoveredEnough = currentNeedActionIsUrgentDriven
+        ? !needsManager.IsNeedUrgent(restNeedType)
+        : !needsManager.ShouldOpportunisticallySatisfy(restNeedType);
+
+    bool sessionCapReached = currentRestInteractable.IsSessionExhausted();
+
+    bool shouldExitRest = maximumDurationReached ||
+                          (minimumDurationSatisfied && holdSatisfied && needRecoveredEnough) ||
+                          (minimumDurationSatisfied && holdSatisfied && sessionCapReached);
+
+    if (!shouldExitRest)
+        return;
+
+    if (maximumDurationReached)
+        Narrate("That's enough rest for now. Time to move again.", "rest-complete-max-duration");
+    else if (needRecoveredEnough)
+        Narrate("That rest helped. I can keep going.", "rest-complete-satisfied");
+    else
+        Narrate("I've gotten all I can from this spot.", "rest-complete-cap-reached");
+
+    StopRestingSession();
+
+    currentTarget = null;
+    currentMemoryTarget = null;
+    currentComfortZoneTarget = null;
+    hasExplorePoint = false;
+    hasIdlePoint = false;
+
+    if (currentNeedActionIsUrgentDriven && HasUrgentNeed())
+        ChangeState(AIState.Explore);
+    else
+        ChangeState(AIState.IdleWander);
+}
 
     private bool TryUseInventoryItemForNeed(NeedType needType)
     {
@@ -1615,17 +1653,19 @@ public class SimpleNPCBrain : MonoBehaviour
 
     private void StopRestingSession()
     {
-        if (currentRestInteractable == null)
-            return;
+        if (currentRestInteractable != null)
+        {
+            currentRestInteractable.EndRestSession(gameObject);
+        }
 
-        currentRestInteractable.EndRestSession(gameObject);
         currentRestInteractable = null;
         currentRestSessionElapsed = 0f;
         currentRestMinimumDuration = 0f;
         currentRestMaximumDuration = 0f;
-        currentRestHoldTime = 0f;
-        currentRestAnchor = null;
-        currentRestAnchorSnapDistance = 0.35f;
+
+        hasRestAnchor = false;
+        currentRestAnchorPosition = Vector3.zero;
+        currentRestHoldTimer = 0f;
     }
 
     private void CommitToRestAnchor(bool forceSnap)

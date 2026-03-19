@@ -50,11 +50,13 @@ public class RestInteractable : Interactable, INeedSatisfier
         if (!CanInteract(interactor))
             return false;
 
+        if (currentRestingActor == interactor && remainingSessionRecovery > 0.0001f)
+            return true;
+
         currentRestingActor = interactor;
         remainingSessionRecovery = MaxRestPerSession;
         return true;
     }
-
     public float RecoverForSeconds(GameObject interactor, float deltaTime)
     {
         if (interactor == null || interactor != currentRestingActor)
