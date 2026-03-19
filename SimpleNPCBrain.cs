@@ -1433,14 +1433,26 @@ public class SimpleNPCBrain : MonoBehaviour
         if (npcInventory == null || !npcInventory.HasItemForNeed(needType))
             return false;
 
-        Interactable item = npcInventory.GetBestItemForNeed(needType);
-        if (item == null)
+        Interactable handItem = npcInventory.GetHandItem();
+        INeedSatisfier handSatisfier = handItem as INeedSatisfier;
+        if (handSatisfier != null && handSatisfier.GetNeedType() == needType && handItem.CanInteract(gameObject))
+        {
+            handItem.Interact(gameObject);
+            return true;
+        }
+
+        Interactable bestItem = npcInventory.GetBestItemForNeed(needType);
+        if (bestItem == null)
             return false;
 
-        if (!item.CanInteract(gameObject))
+        if (!TryPrepareItemInHand(bestItem))
             return false;
 
-        item.Interact(gameObject);
+        Interactable preparedHandItem = npcInventory.GetHandItem();
+        if (preparedHandItem == null || !preparedHandItem.CanInteract(gameObject))
+            return false;
+
+        preparedHandItem.Interact(gameObject);
         return true;
     }
 
@@ -1852,13 +1864,35 @@ public class SimpleNPCBrain : MonoBehaviour
         if (!npcInventory.TryGetMatchingKey(controller.RequiredKeyId, out IKeyItem key))
             return false;
 
-        bool unlocked = controller.TryUnlock(key.GetKeyId());
+        Interactable keyInteractable = key as Interactable;
+        if (keyInteractable != null && !TryPrepareItemInHand(keyInteractable))
+            return false;
+
+        IKeyItem heldKey = npcInventory.GetHandItem() as IKeyItem;
+        if (heldKey == null)
+            return false;
+
+        bool unlocked = controller.TryUnlock(heldKey.GetKeyId());
         if (unlocked)
         {
             Narrate("Good thing I kept this key. That lock is open now.", "door-unlock-success");
         }
 
         return unlocked;
+    }
+
+    private bool TryPrepareItemInHand(Interactable desiredItem)
+    {
+        if (desiredItem == null || npcInventory == null)
+            return false;
+
+        if (npcInventory.GetHandItem() == desiredItem)
+            return true;
+
+        if (npcInventory.HasHandItem)
+            return npcInventory.TrySwapHandItemWithInventoryItem(desiredItem);
+
+        return npcInventory.TryMoveInventoryItemToHand(desiredItem) || npcInventory.TrySetHandItem(desiredItem);
     }
 
     private void OnTriggerEnter(Collider other)
