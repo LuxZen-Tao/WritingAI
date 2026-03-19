@@ -942,7 +942,10 @@ public class SimpleNPCBrain : MonoBehaviour
 
         Vector3 targetPosition = currentTarget.GetInteractionPoint();
         if (!IsPathReachable(targetPosition) && !TryHandleDoorForDestination(targetPosition))
+        {
+            ClearActiveTargets();
             return false;
+        }
 
         ChangeState(AIState.MoveToTarget);
         return true;
@@ -1010,7 +1013,10 @@ public class SimpleNPCBrain : MonoBehaviour
         agent.ResetPath();
 
         if (!IsPathReachable(bestMemory.lastKnownPosition) && !TryHandleDoorForDestination(bestMemory.lastKnownPosition))
+        {
+            ClearActiveTargets();
             return false;
+        }
 
         ChangeState(AIState.MoveToRememberedTarget);
         return true;
@@ -2299,6 +2305,7 @@ public class SimpleNPCBrain : MonoBehaviour
         if (!IsPathReachable(targetPosition) && !TryHandleDoorForDestination(targetPosition))
         {
             DebugFlow($"[PickupTarget] Selected {currentTarget.name} but destination is unreachable.");
+            ClearActiveTargets();
             return false;
         }
 
@@ -2380,7 +2387,10 @@ public class SimpleNPCBrain : MonoBehaviour
 
         Vector3 targetPosition = currentTarget.GetInteractionPoint();
         if (!IsPathReachable(targetPosition) && !TryHandleDoorForDestination(targetPosition))
+        {
+            ClearActiveTargets();
             return false;
+        }
 
         lastOpportunisticComfortLightTime = Time.time;
         ChangeState(AIState.MoveToTarget);
@@ -2817,6 +2827,13 @@ public class SimpleNPCBrain : MonoBehaviour
                 }
                 break;
         }
+    }
+
+    private void ClearActiveTargets()
+    {
+        currentTarget = null;
+        currentMemoryTarget = null;
+        currentComfortZoneTarget = null;
     }
 
     private string Pick(params string[] options)
