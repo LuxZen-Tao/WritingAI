@@ -210,7 +210,7 @@ public class NPCInventory : MonoBehaviour
             heldItemRigidbodyUsedGravity = heldItemRigidbody.useGravity;
             heldItemRigidbody.isKinematic = true;
             heldItemRigidbody.useGravity = false;
-            heldItemRigidbody.velocity = Vector3.zero;
+            heldItemRigidbody.linearVelocity = Vector3.zero;
             heldItemRigidbody.angularVelocity = Vector3.zero;
         }
 

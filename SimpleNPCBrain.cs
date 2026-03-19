@@ -1511,6 +1511,8 @@ public class SimpleNPCBrain : MonoBehaviour
 
         Interactable handItem = npcInventory.GetHandItem();
         INeedSatisfier handSatisfier = handItem as INeedSatisfier;
+
+        // If correct item is already in hand, wait until ready.
         if (handSatisfier != null && handSatisfier.GetNeedType() == needType)
         {
             if (!IsHandItemReadyToUse())
@@ -1524,18 +1526,23 @@ public class SimpleNPCBrain : MonoBehaviour
             return InventoryUseAttempt.Used;
         }
 
+        // Otherwise fetch best item from inventory.
         Interactable bestItem = npcInventory.GetBestItemForNeed(needType);
         if (bestItem == null)
             return InventoryUseAttempt.None;
 
-        if (!TryPrepareItemInHand(bestItem))
+        bool readyNow = TryPrepareItemInHand(bestItem);
+
+        // Freshly moved into hand or still waiting.
+        if (!readyNow)
         {
-            if (npcInventory.GetHandItem() == bestItem && !IsHandItemReadyToUse())
+            if (npcInventory.GetHandItem() == bestItem)
                 return InventoryUseAttempt.WaitingForHandReady;
 
             return InventoryUseAttempt.None;
         }
 
+        // Safety: now it should be in hand and ready.
         Interactable preparedHandItem = npcInventory.GetHandItem();
         if (preparedHandItem == null || !preparedHandItem.CanInteract(gameObject))
             return InventoryUseAttempt.None;
@@ -1544,7 +1551,6 @@ public class SimpleNPCBrain : MonoBehaviour
         SchedulePostUsePocketingIfNeeded(preparedHandItem);
         return InventoryUseAttempt.Used;
     }
-
     private void ValidateRuntimeSetup()
     {
         if (!logSetupValidation)
@@ -1988,10 +1994,16 @@ public class SimpleNPCBrain : MonoBehaviour
         if (desiredItem == null || npcInventory == null)
             return false;
 
+        // Already holding the correct item: only usable once delay has passed.
         if (npcInventory.GetHandItem() == desiredItem)
             return IsHandItemReadyToUse();
 
+        // Still in a blocked/transition window.
+        if (!IsHandItemReadyToUse())
+            return false;
+
         bool movedToHand = false;
+
         if (npcInventory.HasHandItem)
             movedToHand = npcInventory.TrySwapHandItemWithInventoryItem(desiredItem);
         else
@@ -2000,11 +2012,11 @@ public class SimpleNPCBrain : MonoBehaviour
         if (!movedToHand)
             return false;
 
+        // Important: after moving it into hand, do NOT allow instant use.
         MarkHandItemDrawnForUse();
         CancelPendingPostUsePocketing(desiredItem);
         return false;
     }
-
     private void HandleHandItemPresentation()
     {
         if (npcInventory == null)
