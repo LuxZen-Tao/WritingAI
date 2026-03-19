@@ -111,6 +111,8 @@ public class SimpleNPCBrain : MonoBehaviour
 
     private readonly List<RoomArea> overlappingRooms = new List<RoomArea>();
     private RoomArea[] knownRooms;
+    private readonly NpcPerceptionService perceptionService = new NpcPerceptionService();
+    private readonly NpcMemoryService memoryService = new NpcMemoryService();
 
     private NavMeshAgent agent;
 
@@ -167,6 +169,7 @@ public class SimpleNPCBrain : MonoBehaviour
         }
 
         knownRooms = FindObjectsByType<RoomArea>(FindObjectsSortMode.None);
+        perceptionService.Configure(visionRange, visionAngle, interactableLayer, obstacleLayer, doorLayer, eyePoint);
         EnsureThoughtLogger();
         CacheInitialNeedState();
 
@@ -712,33 +715,15 @@ public class SimpleNPCBrain : MonoBehaviour
 
     private void RememberComfortZone(RoomArea room, Vector3 position, bool wasLit)
     {
-        if (room == null)
-            return;
-
-        for (int i = 0; i < rememberedComfortZones.Count; i++)
+        NpcMemoryService.ComfortMemoryWriteResult writeResult = memoryService.RememberComfortZone(rememberedComfortZones, room, position, wasLit, Time.time);
+        if (writeResult == NpcMemoryService.ComfortMemoryWriteResult.UpdatedLightingChanged)
         {
-            if (rememberedComfortZones[i] != null && rememberedComfortZones[i].room == room)
-            {
-                bool litChanged = rememberedComfortZones[i].wasLitWhenLastSeen != wasLit;
-                rememberedComfortZones[i].lastKnownPosition = position;
-                rememberedComfortZones[i].lastSeenTime = Time.time;
-                rememberedComfortZones[i].wasLitWhenLastSeen = wasLit;
-
-                if (litChanged)
-                {
-                    Narrate(wasLit
-                        ? "That room looks lit now."
-                        : "That room just got darker.",
-                        "memory-comfort-update-" + room.GetInstanceID());
-                }
-
-                return;
-            }
+            Narrate(wasLit
+                ? "That room looks lit now."
+                : "That room just got darker.",
+                "memory-comfort-update-" + room.GetInstanceID());
         }
-
-        rememberedComfortZones.Add(new RememberedComfortZone(room, position, Time.time, wasLit));
-
-        if (wasLit)
+        else if (writeResult == NpcMemoryService.ComfortMemoryWriteResult.Added && wasLit)
         {
             Narrate("That room looks lit. I'll remember it.", "memory-comfort-new-" + room.GetInstanceID());
         }
@@ -746,11 +731,7 @@ public class SimpleNPCBrain : MonoBehaviour
 
     private void CleanupComfortZoneMemory()
     {
-        rememberedComfortZones.RemoveAll(z =>
-            z == null ||
-            z.room == null ||
-            Time.time - z.lastSeenTime > comfortZoneMemoryDuration
-        );
+        memoryService.CleanupComfortZoneMemory(rememberedComfortZones, comfortZoneMemoryDuration, Time.time);
     }
 
     private bool TryMoveToVisibleComfortZone(float maxDistance = Mathf.Infinity)
@@ -885,38 +866,16 @@ public class SimpleNPCBrain : MonoBehaviour
 
     private bool CanSeePoint(Vector3 targetPoint)
     {
-        Vector3 origin = eyePoint != null ? eyePoint.position : transform.position + Vector3.up * 1.5f;
-        Vector3 directionToTarget = targetPoint - origin;
-        float distance = directionToTarget.magnitude;
-
-        if (distance > visionRange)
-            return false;
-
-        float angle = Vector3.Angle(transform.forward, directionToTarget);
-        if (angle > visionAngle * 0.5f)
-            return false;
-
-        if (Physics.Raycast(origin, directionToTarget.normalized, out RaycastHit hit, distance, obstacleLayer))
-        {
-            return false;
-        }
-
-        return true;
+        return perceptionService.CanSeePoint(transform, transform.forward, targetPoint);
     }
 
     private void PassiveObserveVisibleInteractables()
     {
-        Collider[] hits = Physics.OverlapSphere(transform.position, visionRange, interactableLayer);
+        List<Interactable> visibleInteractables = perceptionService.GetVisibleInteractables(transform, transform.forward);
 
-        foreach (Collider hit in hits)
+        for (int i = 0; i < visibleInteractables.Count; i++)
         {
-            Interactable interactable = hit.GetComponentInParent<Interactable>();
-
-            if (interactable == null || !interactable.isEnabled)
-                continue;
-
-            if (!CanSeeInteractable(interactable))
-                continue;
+            Interactable interactable = visibleInteractables[i];
 
             // --- KEYS (important: must come BEFORE need satisfiers) ---
             if (interactable is IKeyItem && interactable is IPickupable pickupable && pickupable.CanPickUp(gameObject))
@@ -1441,174 +1400,58 @@ public class SimpleNPCBrain : MonoBehaviour
 
     private void RememberInteractable(Interactable interactable, NeedType needType)
     {
-        if (interactable == null)
-            return;
-
-        for (int i = 0; i < memory.Count; i++)
-        {
-            if (memory[i] != null && memory[i].interactable == interactable)
-            {
-                memory[i].lastKnownPosition = interactable.GetInteractionPoint();
-                memory[i].needType = needType;
-                memory[i].lastSeenTime = Time.time;
-                Narrate("I've seen this before.", "memory-update-interactable-" + interactable.GetInstanceID());
-                return;
-            }
-        }
-
-        memory.Add(new RememberedInteractable(
-            interactable,
-            needType,
-            interactable.GetInteractionPoint(),
-            Time.time
-        ));
-
-        Narrate("I'll remember this for later.", "memory-new-interactable-" + interactable.GetInstanceID());
+        NpcMemoryService.MemoryWriteResult writeResult = memoryService.RememberInteractable(memory, interactable, needType, Time.time);
+        if (writeResult == NpcMemoryService.MemoryWriteResult.Updated)
+            Narrate("I've seen this before.", "memory-update-interactable-" + interactable.GetInstanceID());
+        else if (writeResult == NpcMemoryService.MemoryWriteResult.Added)
+            Narrate("I'll remember this for later.", "memory-new-interactable-" + interactable.GetInstanceID());
     }
 
     private void ForgetInvalidMemories()
     {
-        memory.RemoveAll(m => m == null || m.interactable == null);
+        memoryService.ForgetInvalidMemories(memory);
     }
 
     private void CleanupInteractableMemory()
     {
-        memory.RemoveAll(m =>
-            m == null ||
-            m.interactable == null ||
-            Time.time - m.lastSeenTime > interactableMemoryDuration
-        );
+        memoryService.CleanupInteractableMemory(memory, interactableMemoryDuration, Time.time);
     }
 
     private void RememberLocation(Vector3 position)
     {
-        rememberedLocations.Add(new RememberedLocation(position, Time.time));
+        memoryService.RememberLocation(rememberedLocations, position, Time.time);
     }
 
     private void CleanupLocationMemory()
     {
-        rememberedLocations.RemoveAll(loc => Time.time - loc.timeStored > locationMemoryDuration);
+        memoryService.CleanupLocationMemory(rememberedLocations, locationMemoryDuration, Time.time);
     }
 
     private void CleanupLockedDoorMemory()
     {
-        rememberedLockedDoors.RemoveAll(lockedDoorMemory =>
-        {
-            if (lockedDoorMemory == null || lockedDoorMemory.door == null)
-                return true;
-
-            if (Time.time - lockedDoorMemory.lastSeenTime > lockedDoorMemoryDuration)
-                return true;
-
-            DoorController controller = lockedDoorMemory.door.GetDoorController();
-            if (controller == null || !controller.IsLocked)
-                return true;
-
-            if (string.IsNullOrWhiteSpace(lockedDoorMemory.requiredKeyId))
-                return true;
-
-            return false;
-        });
+        memoryService.CleanupLockedDoorMemory(rememberedLockedDoors, lockedDoorMemoryDuration, Time.time);
     }
 
     private void RememberLockedDoor(DoorInteractable door)
     {
-        if (door == null)
-            return;
-
-        DoorController controller = door.GetDoorController();
-        if (controller == null || !controller.IsLocked)
-            return;
-
-        string requiredKeyId = controller.RequiredKeyId;
-        if (string.IsNullOrWhiteSpace(requiredKeyId))
-            return;
-
-        for (int i = 0; i < rememberedLockedDoors.Count; i++)
-        {
-            RememberedLockedDoor remembered = rememberedLockedDoors[i];
-            if (remembered == null || remembered.door != door)
-                continue;
-
-            remembered.lastKnownPosition = door.GetInteractionPoint();
-            remembered.requiredKeyId = requiredKeyId;
-            remembered.lastSeenTime = Time.time;
-            return;
-        }
-
-        rememberedLockedDoors.Add(new RememberedLockedDoor(
-            door,
-            door.GetInteractionPoint(),
-            requiredKeyId,
-            Time.time
-        ));
-
-        Narrate("I can't open that. I'll remember it.", "memory-locked-door-" + door.GetInstanceID());
+        bool wasAdded = memoryService.RememberLockedDoor(rememberedLockedDoors, door, Time.time);
+        if (wasAdded)
+            Narrate("I can't open that. I'll remember it.", "memory-locked-door-" + door.GetInstanceID());
     }
 
     private bool IsKeyUsefulForRememberedLockedDoor(IKeyItem keyItem)
     {
-        if (keyItem == null)
-            return false;
-
-        string keyId = keyItem.GetKeyId();
-        if (string.IsNullOrWhiteSpace(keyId))
-            return false;
-
-        for (int i = 0; i < rememberedLockedDoors.Count; i++)
-        {
-            RememberedLockedDoor lockedDoorMemory = rememberedLockedDoors[i];
-            if (lockedDoorMemory == null || string.IsNullOrWhiteSpace(lockedDoorMemory.requiredKeyId))
-                continue;
-
-            DoorController controller = lockedDoorMemory.door != null ? lockedDoorMemory.door.GetDoorController() : null;
-            if (controller == null || !controller.IsLocked)
-                continue;
-
-            if (DoorController.KeyIdsMatch(lockedDoorMemory.requiredKeyId, keyId))
-                return true;
-        }
-
-        return false;
+        return memoryService.IsKeyUsefulForRememberedLockedDoor(rememberedLockedDoors, keyItem);
     }
 
     private bool IsRecentlyVisited(Vector3 position)
     {
-        foreach (RememberedLocation loc in rememberedLocations)
-        {
-            if (Vector3.Distance(position, loc.position) <= locationAvoidanceRadius)
-            {
-                return true;
-            }
-        }
-
-        return false;
+        return memoryService.IsRecentlyVisited(rememberedLocations, position, locationAvoidanceRadius);
     }
 
     private bool CanSeeInteractable(Interactable interactable)
     {
-        if (interactable == null)
-            return false;
-
-        Vector3 origin = eyePoint != null ? eyePoint.position : transform.position + Vector3.up * 1.5f;
-        Vector3 target = interactable.GetInteractionPoint();
-
-        Vector3 directionToTarget = target - origin;
-        float distanceToTarget = directionToTarget.magnitude;
-
-        if (distanceToTarget > visionRange)
-            return false;
-
-        float angleToTarget = Vector3.Angle(transform.forward, directionToTarget);
-        if (angleToTarget > visionAngle * 0.5f)
-            return false;
-
-        if (Physics.Raycast(origin, directionToTarget.normalized, out RaycastHit hit, distanceToTarget, obstacleLayer))
-        {
-            return false;
-        }
-
-        return true;
+        return perceptionService.CanSeeInteractable(transform, transform.forward, interactable);
     }
 
     private bool TryHandleNearbyIdleDoor()
@@ -2436,31 +2279,7 @@ public class SimpleNPCBrain : MonoBehaviour
 
     private bool TryGetBlockingDoorTowards(Vector3 destination, out DoorInteractable door)
     {
-        door = null;
-
-        Vector3 origin = eyePoint != null ? eyePoint.position : transform.position + Vector3.up * 1.2f;
-        Vector3 toDestination = destination - origin;
-        toDestination.y = 0f;
-        float distanceToDestination = toDestination.magnitude;
-        if (distanceToDestination <= 0.05f)
-            return false;
-
-        Vector3 probeDirection = toDestination / distanceToDestination;
-        float probeDistance = Mathf.Min(doorCheckDistance, distanceToDestination);
-
-        int probeMask = doorLayer.value == 0 ? interactableLayer : doorLayer;
-
-        if (Physics.SphereCast(origin, 0.2f, probeDirection, out RaycastHit hit, probeDistance, probeMask, QueryTriggerInteraction.Collide))
-        {
-            DoorInteractable hitDoor = hit.collider.GetComponentInParent<DoorInteractable>();
-            if (hitDoor != null && hitDoor.CanInteract(gameObject))
-            {
-                door = hitDoor;
-                return true;
-            }
-        }
-
-        return false;
+        return perceptionService.TryGetBlockingDoorTowards(transform, destination, gameObject, out door, doorCheckDistance);
     }
 
     private bool IsExplorePointBlockedByDoor(Vector3 destination, out DoorInteractable door)
@@ -2620,73 +2439,12 @@ public class SimpleNPCBrain : MonoBehaviour
 
     private bool TryFindBestVisibleMatchingKey(string requiredKeyId, out Interactable bestKey)
     {
-        Collider[] hits = Physics.OverlapSphere(transform.position, visionRange, interactableLayer);
-        bestKey = null;
-        float bestDistance = Mathf.Infinity;
-
-        for (int i = 0; i < hits.Length; i++)
-        {
-            Interactable interactable = hits[i].GetComponentInParent<Interactable>();
-            if (interactable == null || !interactable.isEnabled)
-                continue;
-
-            if (!CanSeeInteractable(interactable))
-                continue;
-
-            if (!(interactable is IKeyItem keyItem))
-                continue;
-
-            if (!DoorController.KeyIdsMatch(requiredKeyId, keyItem.GetKeyId()))
-                continue;
-
-            if (!(interactable is IPickupable pickupable) || !pickupable.CanPickUp(gameObject))
-                continue;
-
-            float distance = Vector3.Distance(transform.position, interactable.GetInteractionPoint());
-            if (distance >= bestDistance)
-                continue;
-
-            bestDistance = distance;
-            bestKey = interactable;
-        }
-
-        return bestKey != null;
+        return perceptionService.TryFindBestVisibleMatchingKey(transform, transform.forward, gameObject, requiredKeyId, out bestKey);
     }
 
     private bool TryFindBestRememberedMatchingKey(string requiredKeyId, out RememberedInteractable bestMemory)
     {
-        ForgetInvalidMemories();
-        bestMemory = null;
-        float bestDistance = Mathf.Infinity;
-
-        for (int i = 0; i < memory.Count; i++)
-        {
-            RememberedInteractable remembered = memory[i];
-            if (remembered == null || remembered.interactable == null)
-                continue;
-
-            Interactable interactable = remembered.interactable;
-            if (!interactable.isEnabled)
-                continue;
-
-            if (!(interactable is IKeyItem keyItem))
-                continue;
-
-            if (!DoorController.KeyIdsMatch(requiredKeyId, keyItem.GetKeyId()))
-                continue;
-
-            if (!(interactable is IPickupable pickupable) || !pickupable.CanPickUp(gameObject))
-                continue;
-
-            float distance = Vector3.Distance(transform.position, remembered.lastKnownPosition);
-            if (distance >= bestDistance)
-                continue;
-
-            bestDistance = distance;
-            bestMemory = remembered;
-        }
-
-        return bestMemory != null;
+        return memoryService.TryFindBestRememberedMatchingKey(memory, requiredKeyId, gameObject, transform.position, out bestMemory);
     }
 
     private bool CommitMatchingKeyTarget(Interactable keyTarget, RememberedInteractable rememberedKeyMemory, bool isVisibleKey)
