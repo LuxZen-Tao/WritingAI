@@ -10,7 +10,8 @@ public class SimpleNPCBrain : MonoBehaviour
         Explore,
         MoveToTarget,
         MoveToRememberedTarget,
-        InteractWithTarget
+        InteractWithTarget,
+        Resting
     }
 
     [Header("State")]
@@ -59,6 +60,12 @@ public class SimpleNPCBrain : MonoBehaviour
     [Header("Opportunistic Needs")]
     public float opportunisticTargetMaxDistance = 2.5f;
     public float opportunisticComfortLightCooldown = 6f;
+
+    [Header("Rest Target Scoring")]
+    public float restTargetDistanceWeight = 0.35f;
+    public float restTargetRateWeight = 1f;
+    public float restTargetDesirabilityWeight = 1f;
+
     [Header("Opportunistic Check")]
     public float opportunisticCheckInterval = 0.5f;
     private float opportunisticCheckTimer = 0f;
@@ -137,6 +144,7 @@ public class SimpleNPCBrain : MonoBehaviour
     private Vector3 pendingDoorDestination;
     private bool hasPendingDoorDestination = false;
     private int currentExploreDoorRouteAttempts = 0;
+    private RestInteractable currentRestInteractable;
 
     private readonly Dictionary<NeedType, NeedsManager.NeedUrgencyBand> lastNeedBands = new Dictionary<NeedType, NeedsManager.NeedUrgencyBand>();
     private readonly Dictionary<NeedType, bool> lastNeedUrgentFlags = new Dictionary<NeedType, bool>();
@@ -276,6 +284,10 @@ public class SimpleNPCBrain : MonoBehaviour
             case AIState.InteractWithTarget:
                 InteractWithCurrentTarget();
                 break;
+
+            case AIState.Resting:
+                HandleRestingState();
+                break;
         }
     }
 
@@ -308,7 +320,8 @@ public class SimpleNPCBrain : MonoBehaviour
         return state == AIState.Explore ||
                state == AIState.MoveToTarget ||
                state == AIState.MoveToRememberedTarget ||
-               state == AIState.InteractWithTarget;
+               state == AIState.InteractWithTarget ||
+               state == AIState.Resting;
     }
 
     private bool IsNeedDrivenState(AIState state)
@@ -944,6 +957,7 @@ public class SimpleNPCBrain : MonoBehaviour
 
         RememberedInteractable bestMemory = null;
         float bestDistance = Mathf.Infinity;
+        float bestScore = float.MinValue;
 
         foreach (RememberedInteractable remembered in memory)
         {
@@ -966,11 +980,30 @@ public class SimpleNPCBrain : MonoBehaviour
                 continue;
 
             float distance = Vector3.Distance(transform.position, remembered.lastKnownPosition);
-            if (distance < bestDistance)
+
+            if (needType == NeedType.Energy && remembered.interactable is RestInteractable restTarget)
             {
-                bestDistance = distance;
-                bestMemory = remembered;
+                float desirability = EvaluateRestTargetDesirability(restTarget, distance, out float expectedGain, out float baseValue);
+                DebugFlow($"[RememberedTarget] {remembered.interactable.name} | dist={distance:0.00} | gain={expectedGain:0.00} | base={baseValue:0.00} | desirability={desirability:0.000}");
+
+                if (desirability <= 0f)
+                    continue;
+
+                if (desirability < bestScore)
+                    continue;
+
+                if (Mathf.Approximately(desirability, bestScore) && distance >= bestDistance)
+                    continue;
+
+                bestScore = desirability;
             }
+            else if (distance >= bestDistance)
+            {
+                continue;
+            }
+
+            bestDistance = distance;
+            bestMemory = remembered;
         }
 
         if (bestMemory == null)
@@ -1218,6 +1251,19 @@ public class SimpleNPCBrain : MonoBehaviour
                 ), "interact-attempt");
 
                 currentTarget.Interact(gameObject);
+
+                RestInteractable restTarget = currentTarget as RestInteractable;
+                if (restTarget != null && currentNeedType == restTarget.GetNeedType())
+                {
+                    if (restTarget.HasActiveSession(gameObject))
+                    {
+                        currentRestInteractable = restTarget;
+                        Narrate("I'll rest here for a bit.", "rest-session-begin");
+                        ChangeState(AIState.Resting);
+                        return;
+                    }
+                }
+
                 Narrate("That worked.", "interact-complete");
             }
         }
@@ -1312,6 +1358,51 @@ public class SimpleNPCBrain : MonoBehaviour
 
         DebugPickup("Pickup declined because carried items were equal or better value.");
         return false;
+    }
+
+    private void HandleRestingState()
+    {
+        ResetStallTimer();
+        agent.ResetPath();
+
+        if (currentRestInteractable == null)
+        {
+            Narrate("I can't rest here anymore. I'll look elsewhere.", "rest-missing-interactable");
+            HandleNeedActionFailure();
+            return;
+        }
+
+        if (!currentRestInteractable.isEnabled || !currentRestInteractable.CanInteract(gameObject))
+        {
+            Narrate("This resting spot is no longer available.", "rest-interactable-unavailable");
+            StopRestingSession();
+            HandleNeedActionFailure();
+            return;
+        }
+
+        float recoveredThisTick = currentRestInteractable.RecoverForSeconds(gameObject, Time.deltaTime);
+        if (recoveredThisTick > 0f)
+        {
+            needsManager.ModifyNeed(currentRestInteractable.GetNeedType(), recoveredThisTick);
+        }
+
+        bool needRecoveredEnough = !needsManager.IsNeedUrgent(currentRestInteractable.GetNeedType());
+        bool sessionCapReached = currentRestInteractable.IsSessionExhausted();
+
+        if (!needRecoveredEnough && !sessionCapReached)
+            return;
+
+        if (needRecoveredEnough)
+            Narrate("That rest helped. I can keep going.", "rest-complete-satisfied");
+        else
+            Narrate("I've gotten all I can from this spot.", "rest-complete-cap-reached");
+
+        StopRestingSession();
+
+        if (currentNeedActionIsUrgentDriven && HasUrgentNeed())
+            ChangeState(AIState.Explore);
+        else
+            ChangeState(AIState.IdleWander);
     }
 
     private bool TryUseInventoryItemForNeed(NeedType needType)
@@ -1455,6 +1546,7 @@ public class SimpleNPCBrain : MonoBehaviour
     {
         DebugAbort("AbortCurrentNeedAction");
 
+        StopRestingSession();
         ResetStallTimer();
         currentTarget = null;
         currentMemoryTarget = null;
@@ -1471,6 +1563,7 @@ public class SimpleNPCBrain : MonoBehaviour
 
     private void RestartNeedSearch()
     {
+        StopRestingSession();
         ResetStallTimer();
         currentTarget = null;
         currentMemoryTarget = null;
@@ -1483,6 +1576,15 @@ public class SimpleNPCBrain : MonoBehaviour
         hasIdlePoint = false;
         agent.ResetPath();
         ChangeState(AIState.Explore);
+    }
+
+    private void StopRestingSession()
+    {
+        if (currentRestInteractable == null)
+            return;
+
+        currentRestInteractable.EndRestSession(gameObject);
+        currentRestInteractable = null;
     }
 
     private float GetNeedMoveSpeed()
@@ -1528,6 +1630,11 @@ public class SimpleNPCBrain : MonoBehaviour
                 hasExplorePoint = false;
                 exploreTimer = 0f;
                 exploreRecheckTimer = 0f;
+                break;
+
+            case AIState.Resting:
+                if (agent.hasPath)
+                    agent.ResetPath();
                 break;
         }
 
@@ -1907,6 +2014,11 @@ public class SimpleNPCBrain : MonoBehaviour
                         return "This is bad. I need food now.";
                     return "I'm starting to get hungry.";
 
+                case NeedType.Energy:
+                    if (currentBand == NeedsManager.NeedUrgencyBand.Critical)
+                        return "I'm exhausted. I need to rest now.";
+                    return "I'm getting tired.";
+
                 default:
                     return "I need to deal with this soon.";
             }
@@ -1950,6 +2062,12 @@ public class SimpleNPCBrain : MonoBehaviour
                 return Pick(
                     "Let's try this.",
                     "This should help."
+                );
+
+            case AIState.Resting:
+                return Pick(
+                    "Time to recover for a moment.",
+                    "I'll rest until I feel better."
                 );
 
             default:
@@ -2285,6 +2403,7 @@ public class SimpleNPCBrain : MonoBehaviour
 
         bestTarget = null;
         bestDistance = Mathf.Infinity;
+        float bestScore = float.MinValue;
 
         foreach (Collider hit in hits)
         {
@@ -2337,7 +2456,32 @@ public class SimpleNPCBrain : MonoBehaviour
                 continue;
             }
 
-            if (distance >= bestDistance)
+            if (needType == NeedType.Energy && interactable is RestInteractable restTarget)
+            {
+                float desirability = EvaluateRestTargetDesirability(restTarget, distance, out float expectedGain, out float baseValue);
+                DebugFlow($"[FindTarget] Rest candidate {interactable.name} | dist={distance:0.00} | gain={expectedGain:0.00} | base={baseValue:0.00} | desirability={desirability:0.000}");
+
+                if (desirability <= 0f)
+                {
+                    DebugFlow($"[FindTarget] Rejected {interactable.name}: desirability <= 0");
+                    continue;
+                }
+
+                if (desirability < bestScore)
+                {
+                    DebugFlow($"[FindTarget] Rejected {interactable.name}: lower desirability than current best ({desirability:0.000} < {bestScore:0.000})");
+                    continue;
+                }
+
+                if (Mathf.Approximately(desirability, bestScore) && distance >= bestDistance)
+                {
+                    DebugFlow($"[FindTarget] Rejected {interactable.name}: tied desirability but farther/equal distance ({distance:0.00} >= {bestDistance:0.00})");
+                    continue;
+                }
+
+                bestScore = desirability;
+            }
+            else if (distance >= bestDistance)
             {
                 DebugFlow($"[FindTarget] Rejected {interactable.name}: not closer than current best ({distance} >= {bestDistance})");
                 continue;
@@ -2357,6 +2501,29 @@ public class SimpleNPCBrain : MonoBehaviour
 
         DebugFlow($"[FindTarget] FAILED: No valid target found for {needType}");
         return false;
+    }
+
+    private float EvaluateRestTargetDesirability(RestInteractable restTarget, float distance, out float expectedGain, out float baseValue)
+    {
+        expectedGain = 0f;
+        baseValue = 0f;
+
+        if (restTarget == null || needsManager == null)
+            return 0f;
+
+        float missingEnergy = needsManager.GetNeedMissingValue(NeedType.Energy);
+        if (missingEnergy <= 0f)
+            return 0f;
+
+        expectedGain = Mathf.Min(missingEnergy, restTarget.MaxRestPerSession);
+
+        float weightedRate = Mathf.Max(0f, restTarget.RestRatePerSecond * restTargetRateWeight);
+        float weightedDesirability = Mathf.Max(0f, restTarget.Desirability * restTargetDesirabilityWeight);
+
+        baseValue = expectedGain * Mathf.Max(0.01f, weightedRate) * Mathf.Max(0.01f, weightedDesirability);
+
+        float distancePenalty = 1f + Mathf.Max(0f, distance) * Mathf.Max(0.0001f, restTargetDistanceWeight);
+        return baseValue / distancePenalty;
     }
 
     private bool TryFindBestVisibleComfortRoom(float maxDistance, out RoomArea bestRoom, out float bestDistance)
@@ -2721,6 +2888,15 @@ public class SimpleNPCBrain : MonoBehaviour
 
         if (doorCheckDistance < 0.25f)
             doorCheckDistance = 0.25f;
+
+        if (restTargetDistanceWeight < 0.0001f)
+            restTargetDistanceWeight = 0.0001f;
+
+        if (restTargetRateWeight < 0f)
+            restTargetRateWeight = 0f;
+
+        if (restTargetDesirabilityWeight < 0f)
+            restTargetDesirabilityWeight = 0f;
 
         perceptionService.Configure(visionRange, visionAngle, interactableLayer, obstacleLayer, doorLayer, eyePoint);
     }

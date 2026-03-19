@@ -65,6 +65,21 @@ public class NeedsManager : MonoBehaviour
             },
             decayPerSecond = 0.35f,
             recoveryPerSecond = 0f
+        },
+        new NeedState
+        {
+            needType = NeedType.Energy,
+            currentValue = 10f,
+            maxValue = 10f,
+            bandThresholds = new NeedBandThresholds
+            {
+                criticalThreshold = 2f,
+                urgentThreshold = 4f,
+                lowThreshold = 7f,
+                stableThreshold = 9f
+            },
+            decayPerSecond = 0.45f,
+            recoveryPerSecond = 0f
         }
     };
 
@@ -72,6 +87,7 @@ public class NeedsManager : MonoBehaviour
     {
         EnsureNeed(NeedType.Comfort);
         EnsureNeed(NeedType.Hunger);
+        EnsureNeed(NeedType.Energy);
         ClampAll();
     }
 
@@ -209,6 +225,15 @@ public class NeedsManager : MonoBehaviour
     {
         NeedState state = GetState(needType);
         return state != null ? state.currentValue : 0f;
+    }
+
+    public float GetNeedMissingValue(NeedType needType)
+    {
+        NeedState state = GetState(needType);
+        if (state == null)
+            return 0f;
+
+        return Mathf.Max(0f, state.maxValue - state.currentValue);
     }
 
     private float GetPassiveDelta(NeedState state, bool isInComfortingArea)
