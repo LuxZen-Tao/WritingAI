@@ -10,6 +10,7 @@ public class NPCInventory : MonoBehaviour
     [SerializeField] private Transform handAnchor;
     [SerializeField] private Vector3 heldItemLocalPosition = Vector3.zero;
     [SerializeField] private Vector3 heldItemLocalEulerAngles = Vector3.zero;
+    private Vector3 heldItemOriginalLocalScale = Vector3.one;
 
     [Header("Drop Offset")]
     public float dropForwardOffset = 0.6f;
@@ -183,9 +184,23 @@ public class NPCInventory : MonoBehaviour
         item.gameObject.SetActive(true);
 
         Transform targetAnchor = handAnchor != null ? handAnchor : transform;
-        item.transform.SetParent(targetAnchor, false);
+
+        // Preserve world scale before reparenting.
+        Vector3 originalWorldScale = item.transform.lossyScale;
+
+        item.transform.SetParent(targetAnchor, true);
+
+        // Place/orient in hand.
         item.transform.localPosition = heldItemLocalPosition;
         item.transform.localRotation = Quaternion.Euler(heldItemLocalEulerAngles);
+
+        // Rebuild local scale so world scale stays visually the same.
+        Vector3 parentScale = targetAnchor.lossyScale;
+        item.transform.localScale = new Vector3(
+            parentScale.x != 0f ? originalWorldScale.x / parentScale.x : originalWorldScale.x,
+            parentScale.y != 0f ? originalWorldScale.y / parentScale.y : originalWorldScale.y,
+            parentScale.z != 0f ? originalWorldScale.z / parentScale.z : originalWorldScale.z
+        );
 
         heldItemRigidbody = item.GetComponent<Rigidbody>();
         heldItemHadRigidbody = heldItemRigidbody != null;
@@ -210,7 +225,6 @@ public class NPCInventory : MonoBehaviour
             heldItemColliders[i].enabled = false;
         }
     }
-
     private void DetachItemFromHand(Interactable item)
     {
         if (item == null)

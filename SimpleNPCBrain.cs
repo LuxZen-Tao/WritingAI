@@ -2966,9 +2966,15 @@ public class SimpleNPCBrain : MonoBehaviour
 
         if (!controller.IsOpen && controller.IsLocked)
         {
-            if (TryUseInventoryKeyOnDoor(pendingDoorTarget))
+            DoorUnlockAttempt unlockAttempt = TryUseInventoryKeyOnDoor(pendingDoorTarget);
+
+            if (unlockAttempt == DoorUnlockAttempt.Unlocked)
             {
                 pendingDoorTarget.Interact(gameObject);
+            }
+            else if (unlockAttempt == DoorUnlockAttempt.WaitingForHandReady)
+            {
+                return true;
             }
             else
             {
