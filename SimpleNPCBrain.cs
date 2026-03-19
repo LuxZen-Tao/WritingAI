@@ -84,6 +84,9 @@ public class SimpleNPCBrain : MonoBehaviour
     [Header("Current Target")]
     public Interactable currentTarget;
 
+    [Header("Inventory")]
+    public NPCInventory npcInventory;
+
     [Header("Thought Logging")]
     [SerializeField] private NPCThoughtLogger thoughtLogger;
 
@@ -135,6 +138,11 @@ public class SimpleNPCBrain : MonoBehaviour
             Debug.LogError("No NeedsManager found on " + gameObject.name);
             enabled = false;
             return;
+        }
+
+        if (npcInventory == null)
+        {
+            npcInventory = GetComponent<NPCInventory>();
         }
 
         knownRooms = FindObjectsByType<RoomArea>(FindObjectsSortMode.None);
@@ -320,6 +328,13 @@ public class SimpleNPCBrain : MonoBehaviour
         if (IsNeedCurrentlySatisfied(currentNeedType))
         {
             Narrate("Okay, that's better.", "explore-need-satisfied");
+            AbortCurrentNeedAction();
+            return;
+        }
+
+        if (currentNeedType == NeedType.Hunger && TryUseInventoryItemForNeed(NeedType.Hunger))
+        {
+            Narrate("I have something for this. I'll use it.", "inventory-use-hunger");
             AbortCurrentNeedAction();
             return;
         }
@@ -1115,14 +1130,27 @@ public class SimpleNPCBrain : MonoBehaviour
 
         if (currentTarget.CanInteract(gameObject))
         {
-            Narrate(Pick(
-                "This should fix things.",
-                "Let's see...",
-                "Alright, this might help."
-            ), "interact-attempt");
+            bool handledAsPickup = false;
 
-            currentTarget.Interact(gameObject);
-            Narrate("That worked.", "interact-complete");
+            IPickupable pickupable = currentTarget as IPickupable;
+            bool isUrgentlyHungry = currentNeedActionIsUrgentDriven && currentNeedType == NeedType.Hunger;
+
+            if (pickupable != null && npcInventory != null && !isUrgentlyHungry)
+            {
+                handledAsPickup = TryPickUpCurrentTarget(pickupable);
+            }
+
+            if (!handledAsPickup)
+            {
+                Narrate(Pick(
+                    "This should fix things.",
+                    "Let's see...",
+                    "Alright, this might help."
+                ), "interact-attempt");
+
+                currentTarget.Interact(gameObject);
+                Narrate("That worked.", "interact-complete");
+            }
         }
         else
         {
@@ -1153,6 +1181,67 @@ public class SimpleNPCBrain : MonoBehaviour
         {
             ChangeState(AIState.IdleWander);
         }
+    }
+
+    private bool TryPickUpCurrentTarget(IPickupable pickupable)
+    {
+        if (!pickupable.CanPickUp(gameObject))
+            return false;
+
+        Interactable item = pickupable as Interactable;
+        if (item == null)
+            return false;
+
+        if (!npcInventory.IsFull)
+        {
+            if (npcInventory.TryAddItem(item))
+            {
+                Narrate("I'll take that for later.", "pickup-store");
+                return true;
+            }
+
+            return false;
+        }
+
+        Interactable leastValuable = npcInventory.GetLeastValuableItem();
+        if (leastValuable == null)
+            return false;
+
+        IPickupable leastPickupable = leastValuable as IPickupable;
+        if (leastPickupable == null)
+            return false;
+
+        if (pickupable.GetItemValue() > leastPickupable.GetItemValue())
+        {
+            Narrate("This is better than what I'm carrying. I'll make room.", "pickup-swap");
+            npcInventory.DropItem(leastValuable);
+
+            if (!npcInventory.TryAddItem(item))
+            {
+                Debug.LogWarning(gameObject.name + ": dropped inventory item but failed to pick up replacement.");
+                return false;
+            }
+
+            return true;
+        }
+
+        return false;
+    }
+
+    private bool TryUseInventoryItemForNeed(NeedType needType)
+    {
+        if (npcInventory == null || !npcInventory.HasItemForNeed(needType))
+            return false;
+
+        Interactable item = npcInventory.GetBestItemForNeed(needType);
+        if (item == null)
+            return false;
+
+        if (!item.CanInteract(gameObject))
+            return false;
+
+        item.Interact(gameObject);
+        return true;
     }
 
     private void AbortCurrentNeedAction()
