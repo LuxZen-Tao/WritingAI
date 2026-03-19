@@ -63,6 +63,7 @@ public class SimpleNPCBrain : MonoBehaviour
     public float opportunisticCheckInterval = 0.5f;
     private float opportunisticCheckTimer = 0f;
     private const float KeyPickupPriorityMultiplier = 3f;
+    private const float MatchingLockedDoorKeyPriorityMultiplier = 3f;
 
     [Header("Idle Wander")]
     public float idleWanderRadius = 3f;
@@ -90,6 +91,10 @@ public class SimpleNPCBrain : MonoBehaviour
     public List<RememberedLocation> rememberedLocations = new List<RememberedLocation>();
     public float locationMemoryDuration = 10f;
     public float locationAvoidanceRadius = 2f;
+
+    [Header("Memory - Locked Doors")]
+    public List<RememberedLockedDoor> rememberedLockedDoors = new List<RememberedLockedDoor>();
+    public float lockedDoorMemoryDuration = 90f;
 
     [Header("Current Target")]
     public Interactable currentTarget;
@@ -179,6 +184,7 @@ public class SimpleNPCBrain : MonoBehaviour
         CleanupLocationMemory();
         CleanupInteractableMemory();
         CleanupComfortZoneMemory();
+        CleanupLockedDoorMemory();
 
         PassiveObserveVisibleInteractables();
         PassiveObserveVisibleComfortZones();
@@ -1434,6 +1440,84 @@ public class SimpleNPCBrain : MonoBehaviour
         rememberedLocations.RemoveAll(loc => Time.time - loc.timeStored > locationMemoryDuration);
     }
 
+    private void CleanupLockedDoorMemory()
+    {
+        rememberedLockedDoors.RemoveAll(lockedDoorMemory =>
+        {
+            if (lockedDoorMemory == null || lockedDoorMemory.door == null)
+                return true;
+
+            if (Time.time - lockedDoorMemory.lastSeenTime > lockedDoorMemoryDuration)
+                return true;
+
+            DoorController controller = lockedDoorMemory.door.GetDoorController();
+            if (controller == null || !controller.IsLocked)
+                return true;
+
+            if (string.IsNullOrWhiteSpace(lockedDoorMemory.requiredKeyId))
+                return true;
+
+            return false;
+        });
+    }
+
+    private void RememberLockedDoor(DoorInteractable door)
+    {
+        if (door == null)
+            return;
+
+        DoorController controller = door.GetDoorController();
+        if (controller == null || !controller.IsLocked)
+            return;
+
+        string requiredKeyId = controller.RequiredKeyId;
+        if (string.IsNullOrWhiteSpace(requiredKeyId))
+            return;
+
+        for (int i = 0; i < rememberedLockedDoors.Count; i++)
+        {
+            RememberedLockedDoor remembered = rememberedLockedDoors[i];
+            if (remembered == null || remembered.door != door)
+                continue;
+
+            remembered.lastKnownPosition = door.GetInteractionPoint();
+            remembered.requiredKeyId = requiredKeyId;
+            remembered.lastSeenTime = Time.time;
+            return;
+        }
+
+        rememberedLockedDoors.Add(new RememberedLockedDoor(
+            door,
+            door.GetInteractionPoint(),
+            requiredKeyId,
+            Time.time
+        ));
+
+        Narrate("I can't open that. I'll remember it.", "memory-locked-door-" + door.GetInstanceID());
+    }
+
+    private bool IsKeyUsefulForRememberedLockedDoor(IKeyItem keyItem)
+    {
+        if (keyItem == null)
+            return false;
+
+        string keyId = keyItem.GetKeyId();
+        if (string.IsNullOrWhiteSpace(keyId))
+            return false;
+
+        for (int i = 0; i < rememberedLockedDoors.Count; i++)
+        {
+            RememberedLockedDoor lockedDoorMemory = rememberedLockedDoors[i];
+            if (lockedDoorMemory == null || string.IsNullOrWhiteSpace(lockedDoorMemory.requiredKeyId))
+                continue;
+
+            if (DoorController.KeyIdsMatch(lockedDoorMemory.requiredKeyId, keyId))
+                return true;
+        }
+
+        return false;
+    }
+
     private bool IsRecentlyVisited(Vector3 position)
     {
         foreach (RememberedLocation loc in rememberedLocations)
@@ -1543,13 +1627,20 @@ public class SimpleNPCBrain : MonoBehaviour
             return true;
 
         if (npcInventory == null)
+        {
+            if (controller.IsLocked)
+                RememberLockedDoor(door);
             return false;
+        }
 
         if (TryUseInventoryKeyOnDoor(door))
         {
             door.Interact(gameObject);
             return controller.IsOpen;
         }
+
+        if (controller.IsLocked)
+            RememberLockedDoor(door);
 
         return false;
     }
@@ -1979,8 +2070,15 @@ public class SimpleNPCBrain : MonoBehaviour
                 continue;
 
             float score = pickupable.GetItemValue();
-            if (interactable is IKeyItem)
+            IKeyItem keyItem = interactable as IKeyItem;
+            bool keyMatchesRememberedLockedDoor = false;
+            if (keyItem != null)
+            {
                 score *= KeyPickupPriorityMultiplier;
+                keyMatchesRememberedLockedDoor = IsKeyUsefulForRememberedLockedDoor(keyItem);
+                if (keyMatchesRememberedLockedDoor)
+                    score *= MatchingLockedDoorKeyPriorityMultiplier;
+            }
 
             if (score < bestScore)
                 continue;
@@ -2007,6 +2105,11 @@ public class SimpleNPCBrain : MonoBehaviour
         Vector3 targetPosition = currentTarget.GetInteractionPoint();
         if (!IsPathReachable(targetPosition) && !TryHandleDoorForDestination(targetPosition))
             return false;
+
+        if (bestItem is IKeyItem bestKeyItem && IsKeyUsefulForRememberedLockedDoor(bestKeyItem))
+        {
+            Narrate("That key could help with that locked door.", "opportunity-key-matches-locked-door");
+        }
 
         ChangeState(AIState.MoveToTarget);
         return true;
@@ -2292,7 +2395,10 @@ public class SimpleNPCBrain : MonoBehaviour
             return false;
 
         if (controller.IsLocked && !HasMatchingInventoryKey(controller))
+        {
+            RememberLockedDoor(door);
             return false;
+        }
 
         if (controller.IsOpen)
         {
@@ -2363,6 +2469,7 @@ public class SimpleNPCBrain : MonoBehaviour
                 }
                 else
                 {
+                    RememberLockedDoor(pendingDoorTarget);
                     pendingDoorTarget = null;
                     hasPendingDoorDestination = false;
                     return false;
