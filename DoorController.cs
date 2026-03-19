@@ -69,6 +69,15 @@ public class DoorController : MonoBehaviour
         RefreshBlockingState();
     }
 
+    private void OnValidate()
+    {
+        if (startsLocked && string.IsNullOrWhiteSpace(requiredKeyId))
+            Debug.LogWarning($"{name}: Door starts locked but requiredKeyId is empty.");
+
+        if (blockingCollider == null && navObstacle == null)
+            Debug.LogWarning($"{name}: Door has no blockingCollider and no NavMeshObstacle assigned.");
+    }
+
 	private void Update()
 	{
 
