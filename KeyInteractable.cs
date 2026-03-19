@@ -11,6 +11,16 @@ public class KeyInteractable : Interactable, IPickupable, IKeyItem
 
     private NPCInventory carriedByInventory;
 
+    private void OnValidate()
+    {
+        if (string.IsNullOrWhiteSpace(keyId))
+            Debug.LogWarning($"{name}: KeyInteractable keyId is empty.");
+
+        Collider itemCollider = GetComponentInChildren<Collider>();
+        if (itemCollider == null)
+            Debug.LogWarning($"{name}: KeyInteractable should have a collider for perception/pickup.");
+    }
+
     public string GetKeyId()
     {
         return keyId;

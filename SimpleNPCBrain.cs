@@ -108,6 +108,9 @@ public class SimpleNPCBrain : MonoBehaviour
 
     [Header("Debug")]
     [SerializeField] private bool debugOpportunisticFlow = true;
+    [SerializeField] private bool enableInvariantChecks = true;
+    [SerializeField] private float invariantCheckInterval = 1f;
+    [SerializeField] private bool logSetupValidation = true;
 
     private readonly List<RoomArea> overlappingRooms = new List<RoomArea>();
     private RoomArea[] knownRooms;
@@ -139,6 +142,9 @@ public class SimpleNPCBrain : MonoBehaviour
     private readonly Dictionary<NeedType, bool> lastNeedUrgentFlags = new Dictionary<NeedType, bool>();
     private float lastOpportunisticComfortLightTime = -999f;
     private float lastMatchingLockedDoorKeyNarrationTime = -999f;
+    private float invariantCheckTimer = 0f;
+    private float lastInvariantWarningTime = -999f;
+    private const float InvariantWarningCooldown = 2f;
 
     private void Start()
     {
@@ -177,6 +183,8 @@ public class SimpleNPCBrain : MonoBehaviour
         hasIdlePoint = false;
         idlePauseTimer = idlePauseDuration;
         opportunisticCheckTimer = Random.Range(0f, opportunisticCheckInterval);
+        invariantCheckTimer = Random.Range(0f, Mathf.Max(0.2f, invariantCheckInterval));
+        ValidateRuntimeSetup();
         
         Narrate("What a beautiful day! Let's go for a wander 😊.", "state-idle-start");
     }
@@ -190,6 +198,7 @@ public class SimpleNPCBrain : MonoBehaviour
         CleanupInteractableMemory();
         CleanupComfortZoneMemory();
         CleanupLockedDoorMemory();
+        RunInvariantChecks();
 
         PassiveObserveVisibleInteractables();
         PassiveObserveVisibleComfortZones();
@@ -944,6 +953,12 @@ public class SimpleNPCBrain : MonoBehaviour
             if (remembered.needType != needType)
                 continue;
 
+            if (remembered.interactable is IKeyItem)
+            {
+                WarnInvariant("Invariant: remembered key appeared in need-target selection path. Skipping it.");
+                continue;
+            }
+
             if (!(remembered.interactable is INeedSatisfier))
                 continue;
 
@@ -1313,6 +1328,127 @@ public class SimpleNPCBrain : MonoBehaviour
 
         item.Interact(gameObject);
         return true;
+    }
+
+    private void ValidateRuntimeSetup()
+    {
+        if (!logSetupValidation)
+            return;
+
+        if (eyePoint == null)
+            Debug.LogWarning($"{name}: eyePoint is not assigned. Vision will use fallback head position.");
+
+        if (interactableLayer.value == 0)
+            Debug.LogWarning($"{name}: interactableLayer is empty. Visible interactable/key detection will fail.");
+
+        if (doorLayer.value == 0)
+            Debug.LogWarning($"{name}: doorLayer is empty. Door probing will fall back to interactableLayer.");
+
+        if (npcInventory == null)
+            Debug.LogWarning($"{name}: NPCInventory missing. Key storage and inventory item usage paths are disabled.");
+
+        Collider selfCollider = GetComponent<Collider>();
+        if (selfCollider == null || !selfCollider.isTrigger)
+            Debug.LogWarning($"{name}: NPC should have a trigger collider for room overlap tracking (OnTriggerEnter/Exit).");
+
+        DoorInteractable[] doors = FindObjectsByType<DoorInteractable>(FindObjectsSortMode.None);
+        for (int i = 0; i < doors.Length; i++)
+        {
+            if (doors[i] != null && doors[i].GetDoorController() == null)
+                Debug.LogWarning($"{name}: DoorInteractable '{doors[i].name}' has no DoorController in parent chain.");
+        }
+
+        Interactable[] interactables = FindObjectsByType<Interactable>(FindObjectsSortMode.None);
+        for (int i = 0; i < interactables.Length; i++)
+        {
+            Interactable interactable = interactables[i];
+            if (interactable == null)
+                continue;
+
+            if (interactable is IPickupable)
+            {
+                Collider pickupCollider = interactable.GetComponentInChildren<Collider>();
+                if (pickupCollider == null)
+                    Debug.LogWarning($"{name}: Pickupable '{interactable.name}' is missing a collider.");
+            }
+        }
+    }
+
+    private void RunInvariantChecks()
+    {
+        if (!enableInvariantChecks)
+            return;
+
+        invariantCheckTimer -= Time.deltaTime;
+        if (invariantCheckTimer > 0f)
+            return;
+
+        invariantCheckTimer = Mathf.Max(0.2f, invariantCheckInterval);
+        CheckPrimaryTargetInvariant();
+        CheckRememberedStateInvariant();
+        CheckPendingDoorInvariant();
+        CheckCurrentTargetValidityInvariant();
+    }
+
+    private void CheckPrimaryTargetInvariant()
+    {
+        int activeModes = 0;
+        if (currentTarget != null) activeModes++;
+        if (currentMemoryTarget != null) activeModes++;
+        if (currentComfortZoneTarget != null) activeModes++;
+
+        bool bridgeRememberedInteractable = currentTarget != null &&
+                                            currentMemoryTarget != null &&
+                                            currentMemoryTarget.interactable == currentTarget &&
+                                            currentComfortZoneTarget == null;
+
+        if (activeModes > 1 && !bridgeRememberedInteractable)
+            WarnInvariant("Invariant: conflicting target modes active (currentTarget/currentMemoryTarget/currentComfortZoneTarget).");
+    }
+
+    private void CheckRememberedStateInvariant()
+    {
+        if (currentState != AIState.MoveToRememberedTarget)
+            return;
+
+        if (currentMemoryTarget == null && currentComfortZoneTarget == null)
+            WarnInvariant("Invariant: MoveToRememberedTarget has no remembered target context.");
+    }
+
+    private void CheckPendingDoorInvariant()
+    {
+        if (pendingDoorTarget == null)
+            return;
+
+        if (pendingDoorTarget.GetDoorController() == null)
+        {
+            WarnInvariant("Invariant: pendingDoorTarget has no DoorController. Clearing pending door state.");
+            pendingDoorTarget = null;
+            hasPendingDoorDestination = false;
+        }
+    }
+
+    private void CheckCurrentTargetValidityInvariant()
+    {
+        if (currentTarget == null)
+            return;
+
+        if (!currentTarget.isEnabled)
+        {
+            WarnInvariant("Invariant: currentTarget is disabled. Clearing current target context.");
+            currentTarget = null;
+            if (currentMemoryTarget != null && currentMemoryTarget.interactable == null)
+                currentMemoryTarget = null;
+        }
+    }
+
+    private void WarnInvariant(string message)
+    {
+        if (Time.time < lastInvariantWarningTime + InvariantWarningCooldown)
+            return;
+
+        lastInvariantWarningTime = Time.time;
+        Debug.LogWarning($"{name}: {message}");
     }
 
     private void AbortCurrentNeedAction()
@@ -2576,5 +2712,16 @@ public class SimpleNPCBrain : MonoBehaviour
             return;
 
         Debug.Log($"{name} | Flow | {reason} | state={currentState} | need={currentNeedType} | urgentDriven={currentNeedActionIsUrgentDriven}");
+    }
+
+    private void OnValidate()
+    {
+        if (invariantCheckInterval < 0.2f)
+            invariantCheckInterval = 0.2f;
+
+        if (doorCheckDistance < 0.25f)
+            doorCheckDistance = 0.25f;
+
+        perceptionService.Configure(visionRange, visionAngle, interactableLayer, obstacleLayer, doorLayer, eyePoint);
     }
 }

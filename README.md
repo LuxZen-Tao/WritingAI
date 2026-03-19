@@ -189,6 +189,12 @@ To build a scalable AI system where adding new **needs**, **objects**, and **env
 - **Physics** (raycasting for vision)
 - Custom AI state system
 
+## ✅ Scene Reliability Checklist
+
+For required component/layer/collider/door/navmesh setup, use:
+
+- [`SCENE_SETUP_CHECKLIST.md`](SCENE_SETUP_CHECKLIST.md)
+
 ## 📌 Status
 
 Active development — foundational systems in place, expanding toward richer emergent behaviour.
