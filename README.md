@@ -77,12 +77,31 @@ Transitions are dynamic and interruptible based on world changes.
 
 All world objects inherit from a base `Interactable` class. Examples:
 - **Light switches**
-- *(Future: doors, tools, stations, etc.)*
+- **Food items** (apple, etc.)
+- **Doors**
 
 Each interactable:
 - Defines if it can be used (`CanInteract`)
 - Provides an interaction point
 - Can optionally satisfy a need (via `INeedSatisfier`)
+- Can optionally be picked up and stored (via `IPickupable`)
+
+### 🔹 Food System
+
+Food items share a common `FoodInteractable` base class that handles hunger restoration, consumption, and inventory pickup. Specific food types (e.g., `AppleInteractable`) extend this base with their own default values.
+
+- `FoodInteractable` — base class for all food; implements `INeedSatisfier` and `IPickupable`
+- `itemValue` — controls how precious this food is when deciding inventory swaps
+
+### 🔹 NPC Inventory
+
+NPCs can carry a limited number of items using the `NPCInventory` component.
+
+- Configurable `maxSlots` (default 3)
+- Items are hidden from the world while held
+- When urgently hungry, the NPC checks its inventory first before searching the world
+- When picking up food opportunistically (low hunger band), the NPC stores it for later
+- If inventory is full but a more valuable item is available, the NPC drops its least-precious item and picks up the better one
 
 ### 🔹 Room & Environment System
 
@@ -131,7 +150,13 @@ Need decreases (e.g., dark room)
 
 - ✅ Needs-driven AI (Comfort + Hunger)
 - ✅ Modular `NeedsManager` foundation for additional needs
-- ✅ Apple interactable that restores hunger
+- ✅ `FoodInteractable` base class — shared food logic (hunger restore, pickup, inventory)
+- ✅ `AppleInteractable` — extends `FoodInteractable` with apple-specific defaults
+- ✅ NPC inventory (`NPCInventory`) — carry food for later use
+- ✅ Inventory-first hunger resolution — NPC uses held food before searching the world
+- ✅ Opportunistic food pickup — NPC stores food when hunger is low rather than eating immediately
+- ✅ Inventory swap — NPC drops least-precious item to collect a more valuable world item
+- ✅ `IPickupable` interface — any interactable can become a carriable item
 - ✅ Vision-based perception (FOV + raycasting)
 - ✅ Passive world observation during all states
 - ✅ Interactable memory (object + need + last known position)
