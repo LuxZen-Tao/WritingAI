@@ -926,10 +926,20 @@ public class SimpleNPCBrain : MonoBehaviour
             }
 
             INeedSatisfier satisfier = interactable as INeedSatisfier;
-            if (satisfier == null)
+            if (satisfier != null)
+            {
+                RememberInteractable(interactable, satisfier.GetNeedType());
                 continue;
+            }
 
-            RememberInteractable(interactable, satisfier.GetNeedType());
+            // Remember keys so they can be retrieved later for locked doors.
+            IKeyItem keyItem = interactable as IKeyItem;
+            if (keyItem != null)
+            {
+                IPickupable pickupable = interactable as IPickupable;
+                if (pickupable != null && pickupable.CanPickUp(gameObject))
+                    RememberInteractable(interactable, NeedType.Key);
+            }
         }
     }
 
@@ -1049,6 +1059,17 @@ public class SimpleNPCBrain : MonoBehaviour
             if (TryHandleDoorForDestination(targetPosition))
                 return;
 
+            // If a locked door is blocking this path, actively seek the matching key.
+            if (TryGetBlockingDoorTowards(targetPosition, out DoorInteractable stalledDoor))
+            {
+                DoorController stalledController = stalledDoor?.GetDoorController();
+                if (stalledController != null && stalledController.IsLocked && !HasMatchingInventoryKey(stalledController))
+                {
+                    if (TryTargetMatchingKey(stalledController.RequiredKeyId))
+                        return;
+                }
+            }
+
             Narrate("Something is blocking this route. I'll search for another path.", "move-target-stalled-fallback");
             HandleNeedActionFailure();
             return;
@@ -1097,6 +1118,17 @@ public class SimpleNPCBrain : MonoBehaviour
                 if (TryHandleDoorForDestination(currentComfortZoneTarget.lastKnownPosition))
                     return;
 
+                // If a locked door is blocking this path, actively seek the matching key.
+                if (TryGetBlockingDoorTowards(currentComfortZoneTarget.lastKnownPosition, out DoorInteractable stalledDoorCZ))
+                {
+                    DoorController stalledControllerCZ = stalledDoorCZ?.GetDoorController();
+                    if (stalledControllerCZ != null && stalledControllerCZ.IsLocked && !HasMatchingInventoryKey(stalledControllerCZ))
+                    {
+                        if (TryTargetMatchingKey(stalledControllerCZ.RequiredKeyId))
+                            return;
+                    }
+                }
+
                 Narrate("I can't reach that lit area from here. I'll find another option.", "move-remembered-comfort-stalled-fallback");
                 currentComfortZoneTarget = null;
                 HandleNeedActionFailure();
@@ -1140,6 +1172,17 @@ public class SimpleNPCBrain : MonoBehaviour
         {
             if (TryHandleDoorForDestination(currentMemoryTarget.lastKnownPosition))
                 return;
+
+            // If a locked door is blocking this path, actively seek the matching key.
+            if (TryGetBlockingDoorTowards(currentMemoryTarget.lastKnownPosition, out DoorInteractable stalledDoorMT))
+            {
+                DoorController stalledControllerMT = stalledDoorMT?.GetDoorController();
+                if (stalledControllerMT != null && stalledControllerMT.IsLocked && !HasMatchingInventoryKey(stalledControllerMT))
+                {
+                    if (TryTargetMatchingKey(stalledControllerMT.RequiredKeyId))
+                        return;
+                }
+            }
 
             Narrate("This route is blocked. I'll try a different lead.", "move-remembered-target-stalled-fallback");
             currentMemoryTarget = null;
@@ -1529,6 +1572,95 @@ public class SimpleNPCBrain : MonoBehaviour
 
             if (DoorController.KeyIdsMatch(lockedDoorMemory.requiredKeyId, keyId))
                 return true;
+        }
+
+        return false;
+    }
+
+    // Actively searches for a key that matches requiredKeyId: first visible, then remembered.
+    // If found, assigns the key as currentTarget and transitions to the appropriate move state.
+    // Returns true if a matching key was targeted, false otherwise.
+    private bool TryTargetMatchingKey(string requiredKeyId)
+    {
+        if (string.IsNullOrWhiteSpace(requiredKeyId))
+            return false;
+
+        // --- 1. Search visible keys ---
+        Collider[] hits = Physics.OverlapSphere(transform.position, visionRange, interactableLayer);
+        Interactable bestVisible = null;
+        float bestVisibleDistance = Mathf.Infinity;
+
+        for (int i = 0; i < hits.Length; i++)
+        {
+            Interactable interactable = hits[i].GetComponentInParent<Interactable>();
+            if (interactable == null || !interactable.isEnabled)
+                continue;
+
+            IKeyItem keyItem = interactable as IKeyItem;
+            if (keyItem == null || !DoorController.KeyIdsMatch(keyItem.GetKeyId(), requiredKeyId))
+                continue;
+
+            IPickupable pickupable = interactable as IPickupable;
+            if (pickupable == null || !pickupable.CanPickUp(gameObject))
+                continue;
+
+            if (!CanSeeInteractable(interactable))
+                continue;
+
+            float dist = Vector3.Distance(transform.position, interactable.GetInteractionPoint());
+            if (dist < bestVisibleDistance)
+            {
+                bestVisibleDistance = dist;
+                bestVisible = interactable;
+            }
+        }
+
+        if (bestVisible != null)
+        {
+            currentTarget = bestVisible;
+            currentMemoryTarget = null;
+            currentComfortZoneTarget = null;
+            currentNeedActionIsUrgentDriven = false;
+            pendingDoorTarget = null;
+            hasPendingDoorDestination = false;
+            hasExplorePoint = false;
+            hasIdlePoint = false;
+            agent.ResetPath();
+            Narrate("I can see the key I need. Going to get it.", "key-retrieval-visible");
+            ChangeState(AIState.MoveToTarget);
+            return true;
+        }
+
+        // --- 2. Search remembered keys ---
+        for (int i = 0; i < memory.Count; i++)
+        {
+            RememberedInteractable remembered = memory[i];
+            if (remembered == null || remembered.interactable == null)
+                continue;
+
+            IKeyItem keyItem = remembered.interactable as IKeyItem;
+            if (keyItem == null || !DoorController.KeyIdsMatch(keyItem.GetKeyId(), requiredKeyId))
+                continue;
+
+            if (!remembered.interactable.isEnabled)
+                continue;
+
+            IPickupable pickupable = remembered.interactable as IPickupable;
+            if (pickupable == null || !pickupable.CanPickUp(gameObject))
+                continue;
+
+            currentTarget = remembered.interactable;
+            currentMemoryTarget = remembered;
+            currentComfortZoneTarget = null;
+            currentNeedActionIsUrgentDriven = false;
+            pendingDoorTarget = null;
+            hasPendingDoorDestination = false;
+            hasExplorePoint = false;
+            hasIdlePoint = false;
+            agent.ResetPath();
+            Narrate("I remember seeing a key that could open that door.", "key-retrieval-remembered");
+            ChangeState(AIState.MoveToRememberedTarget);
+            return true;
         }
 
         return false;
@@ -2471,70 +2603,72 @@ public class SimpleNPCBrain : MonoBehaviour
     }
 
     private bool HandlePendingDoorTarget()
+{
+    if (pendingDoorTarget == null)
+        return false;
+
+    DoorController controller = pendingDoorTarget.GetDoorController();
+    if (controller == null)
     {
-        if (pendingDoorTarget == null)
-            return false;
+        pendingDoorTarget = null;
+        hasPendingDoorDestination = false;
+        return false;
+    }
 
-        DoorController controller = pendingDoorTarget.GetDoorController();
-        if (controller == null)
-        {
-            pendingDoorTarget = null;
-            hasPendingDoorDestination = false;
-            return false;
-        }
+    if (controller.IsOpen)
+    {
+        pendingDoorTarget = null;
+        Vector3 repathDestination = hasPendingDoorDestination ? pendingDoorDestination : transform.position;
+        hasPendingDoorDestination = false;
+        agent.ResetPath();
+        agent.SetDestination(repathDestination);
+        ResetStallTimer();
+        return true;
+    }
 
-        if (controller.IsOpen)
-        {
-            pendingDoorTarget = null;
-            Vector3 repathDestination = hasPendingDoorDestination ? pendingDoorDestination : transform.position;
-            hasPendingDoorDestination = false;
-            agent.ResetPath();
-            agent.SetDestination(repathDestination);
-            ResetStallTimer();
+    Vector3 doorPoint = pendingDoorTarget.GetInteractionPoint();
+    agent.speed = GetActionMoveSpeed();
+    agent.SetDestination(doorPoint);
+
+    if (!agent.pathPending && agent.remainingDistance <= Mathf.Max(doorStopDistance, pendingDoorTarget.interactionRange))
+    {
+        if (Time.time < lastDoorInteractTime + doorInteractCooldown)
             return true;
+
+        if (!pendingDoorTarget.CanInteract(gameObject))
+        {
+            pendingDoorTarget = null;
+            hasPendingDoorDestination = false;
+            return false;
         }
 
-        Vector3 doorPoint = pendingDoorTarget.GetInteractionPoint();
-        agent.speed = GetActionMoveSpeed();
-        agent.SetDestination(doorPoint);
+        pendingDoorTarget.Interact(gameObject);
+        lastDoorInteractTime = Time.time;
 
-        if (!agent.pathPending && agent.remainingDistance <= Mathf.Max(doorStopDistance, pendingDoorTarget.interactionRange))
+        if (!controller.IsOpen && controller.IsLocked)
         {
-            if (Time.time < lastDoorInteractTime + doorInteractCooldown)
-                return true;
-
-            if (!pendingDoorTarget.CanInteract(gameObject))
+            if (TryUseInventoryKeyOnDoor(pendingDoorTarget))
             {
+                pendingDoorTarget.Interact(gameObject);
+            }
+            else
+            {
+                RememberLockedDoor(pendingDoorTarget);
+
+                if (TryAcquireMatchingKeyForLockedDoor(controller.RequiredKeyId))
+                    return true;
+
                 pendingDoorTarget = null;
                 hasPendingDoorDestination = false;
                 return false;
             }
-
-            pendingDoorTarget.Interact(gameObject);
-            lastDoorInteractTime = Time.time;
-
-            if (!controller.IsOpen && controller.IsLocked)
-            {
-                if (TryUseInventoryKeyOnDoor(pendingDoorTarget))
-                {
-                    pendingDoorTarget.Interact(gameObject);
-                }
-                else
-                {
-                    RememberLockedDoor(pendingDoorTarget);
-                    if (TryAcquireMatchingKeyForLockedDoor(controller.RequiredKeyId))
-                        return true;
-                    pendingDoorTarget = null;
-                    hasPendingDoorDestination = false;
-                    return false;
-                }
-            }
-
-            ResetStallTimer();
         }
 
-        return true;
+        ResetStallTimer();
     }
+
+    return true;
+}
 
     private void QueueDoorHandling(DoorInteractable door, Vector3 destination)
     {
