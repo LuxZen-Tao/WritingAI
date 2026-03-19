@@ -53,6 +53,7 @@ public class SimpleNPCBrain : MonoBehaviour
     public float doorCheckDistance = 1.75f;
     public LayerMask doorLayer;
     public float doorInteractCooldown = 0.5f;
+    public float doorStopDistance = 1.15f;
 
     [Header("Opportunistic Needs")]
     public float opportunisticTargetMaxDistance = 2.5f;
@@ -104,6 +105,9 @@ public class SimpleNPCBrain : MonoBehaviour
     private NeedType currentNeedType = NeedType.Comfort;
     private bool currentNeedActionIsUrgentDriven = false;
     private float lastDoorInteractTime = -999f;
+    private DoorInteractable pendingDoorTarget;
+    private Vector3 pendingDoorDestination;
+    private bool hasPendingDoorDestination = false;
 
     private readonly Dictionary<NeedType, NeedsManager.NeedUrgencyBand> lastNeedBands = new Dictionary<NeedType, NeedsManager.NeedUrgencyBand>();
     private readonly Dictionary<NeedType, bool> lastNeedUrgentFlags = new Dictionary<NeedType, bool>();
@@ -308,6 +312,9 @@ public class SimpleNPCBrain : MonoBehaviour
 
     private void ExploreForTarget()
     {
+        if (HandlePendingDoorTarget())
+            return;
+
         if (IsNeedCurrentlySatisfied(currentNeedType))
         {
             Narrate("Okay, that's better.", "explore-need-satisfied");
@@ -368,9 +375,6 @@ public class SimpleNPCBrain : MonoBehaviour
 
         if (IsStalled())
         {
-            if (TryHandleBlockingDoor())
-                return;
-
             RememberLocation(currentExplorePoint);
             Narrate("I can't move through here. I'll try another route.", "explore-stalled-fallback");
             hasExplorePoint = false;
@@ -657,6 +661,9 @@ public class SimpleNPCBrain : MonoBehaviour
         Vector3 bestPoint = bestRoom.GetRoomCenterPoint();
         bool wasLit = bestRoom.IsLit();
 
+        if (!IsPathReachable(bestPoint) && !TryHandleDoorForDestination(bestPoint))
+            return false;
+
         Narrate("There's a lit area over there. That should help.", "perception-visible-comfort-target");
 
         RememberComfortZone(bestRoom, bestPoint, wasLit);
@@ -703,6 +710,9 @@ public class SimpleNPCBrain : MonoBehaviour
         if (bestZone == null)
             return false;
 
+        if (!IsPathReachable(bestZone.lastKnownPosition) && !TryHandleDoorForDestination(bestZone.lastKnownPosition))
+            return false;
+
         Narrate("I remember a lit place. I'll head there.", "recall-comfort-known-lit");
 
         currentComfortZoneTarget = bestZone;
@@ -727,9 +737,6 @@ public class SimpleNPCBrain : MonoBehaviour
             if (zone == null || zone.room == null)
                 continue;
 
-            if (!IsPathReachable(zone.lastKnownPosition))
-                continue;
-
             float distance = Vector3.Distance(transform.position, zone.lastKnownPosition);
             if (distance < bestDistance)
             {
@@ -739,6 +746,9 @@ public class SimpleNPCBrain : MonoBehaviour
         }
 
         if (bestZone == null)
+            return false;
+
+        if (!IsPathReachable(bestZone.lastKnownPosition) && !TryHandleDoorForDestination(bestZone.lastKnownPosition))
             return false;
 
         Narrate("I've been near a place that might help. I'll try it again.", "recall-comfort-potential");
@@ -840,6 +850,10 @@ public class SimpleNPCBrain : MonoBehaviour
         hasIdlePoint = false;
         agent.ResetPath();
 
+        Vector3 targetPosition = currentTarget.GetInteractionPoint();
+        if (!IsPathReachable(targetPosition) && !TryHandleDoorForDestination(targetPosition))
+            return false;
+
         ChangeState(AIState.MoveToTarget);
         return true;
     }
@@ -886,12 +900,18 @@ public class SimpleNPCBrain : MonoBehaviour
         hasIdlePoint = false;
         agent.ResetPath();
 
+        if (!IsPathReachable(bestMemory.lastKnownPosition) && !TryHandleDoorForDestination(bestMemory.lastKnownPosition))
+            return false;
+
         ChangeState(AIState.MoveToRememberedTarget);
         return true;
     }
 
     private void MoveToCurrentTarget()
     {
+        if (HandlePendingDoorTarget())
+            return;
+
         if (currentNeedActionIsUrgentDriven && !HasUrgentNeed())
         {
             Narrate("I don't need this anymore.", "move-target-no-urgent");
@@ -919,7 +939,7 @@ public class SimpleNPCBrain : MonoBehaviour
 
         if (IsStalled())
         {
-            if (TryHandleBlockingDoor())
+            if (TryHandleDoorForDestination(targetPosition))
                 return;
 
             Narrate("Something is blocking this route. I'll search for another path.", "move-target-stalled-fallback");
@@ -935,6 +955,9 @@ public class SimpleNPCBrain : MonoBehaviour
 
     private void MoveToRememberedTarget()
     {
+        if (HandlePendingDoorTarget())
+            return;
+
         if (currentNeedActionIsUrgentDriven && !HasUrgentNeed())
         {
             Narrate("I'm okay now. No need to keep chasing this.", "move-remembered-no-urgent");
@@ -964,7 +987,7 @@ public class SimpleNPCBrain : MonoBehaviour
 
             if (IsStalled())
             {
-                if (TryHandleBlockingDoor())
+                if (TryHandleDoorForDestination(currentComfortZoneTarget.lastKnownPosition))
                     return;
 
                 Narrate("I can't reach that lit area from here. I'll find another option.", "move-remembered-comfort-stalled-fallback");
@@ -1008,7 +1031,7 @@ public class SimpleNPCBrain : MonoBehaviour
 
         if (IsStalled())
         {
-            if (TryHandleBlockingDoor())
+            if (TryHandleDoorForDestination(currentMemoryTarget.lastKnownPosition))
                 return;
 
             Narrate("This route is blocked. I'll try a different lead.", "move-remembered-target-stalled-fallback");
@@ -1104,6 +1127,8 @@ public class SimpleNPCBrain : MonoBehaviour
         currentMemoryTarget = null;
         currentComfortZoneTarget = null;
         currentNeedActionIsUrgentDriven = false;
+        pendingDoorTarget = null;
+        hasPendingDoorDestination = false;
         hasExplorePoint = false;
         hasIdlePoint = false;
         agent.ResetPath();
@@ -1117,6 +1142,8 @@ public class SimpleNPCBrain : MonoBehaviour
         currentMemoryTarget = null;
         currentComfortZoneTarget = null;
         currentNeedActionIsUrgentDriven = true;
+        pendingDoorTarget = null;
+        hasPendingDoorDestination = false;
         hasExplorePoint = false;
         hasIdlePoint = false;
         agent.ResetPath();
@@ -1133,6 +1160,9 @@ public class SimpleNPCBrain : MonoBehaviour
 
     private void HandleNeedActionFailure()
     {
+        pendingDoorTarget = null;
+        hasPendingDoorDestination = false;
+
         if (currentNeedActionIsUrgentDriven || HasUrgentNeed())
         {
             ChangeState(AIState.Explore);
@@ -1668,37 +1698,41 @@ public class SimpleNPCBrain : MonoBehaviour
         stallTimer = 0f;
     }
 
-    private bool TryGetDoorAhead(out DoorInteractable door)
+    private bool TryGetBlockingDoorTowards(Vector3 destination, out DoorInteractable door)
     {
         door = null;
 
         Vector3 origin = eyePoint != null ? eyePoint.position : transform.position + Vector3.up * 1.2f;
-        Vector3 movementDirection = agent != null && agent.desiredVelocity.sqrMagnitude > 0.001f
-            ? agent.desiredVelocity.normalized
-            : transform.forward;
+        Vector3 toDestination = destination - origin;
+        toDestination.y = 0f;
+        float distanceToDestination = toDestination.magnitude;
+        if (distanceToDestination <= 0.05f)
+            return false;
+
+        Vector3 probeDirection = toDestination / distanceToDestination;
+        float probeDistance = Mathf.Min(doorCheckDistance, distanceToDestination);
 
         int probeMask = doorLayer.value == 0 ? interactableLayer : doorLayer;
 
-        if (Physics.SphereCast(origin, 0.2f, movementDirection, out RaycastHit hit, doorCheckDistance, probeMask, QueryTriggerInteraction.Collide))
+        if (Physics.SphereCast(origin, 0.2f, probeDirection, out RaycastHit hit, probeDistance, probeMask, QueryTriggerInteraction.Collide))
         {
             DoorInteractable hitDoor = hit.collider.GetComponentInParent<DoorInteractable>();
-            if (hitDoor != null)
+            if (hitDoor != null && hitDoor.CanInteract(gameObject))
             {
-                Vector3 toDoor = (hitDoor.transform.position - transform.position).normalized;
-                if (Vector3.Dot(movementDirection, toDoor) >= 0.35f)
-                {
-                    door = hitDoor;
-                    return true;
-                }
+                door = hitDoor;
+                return true;
             }
         }
 
         return false;
     }
 
-    private bool TryHandleBlockingDoor()
+    private bool TryHandleDoorForDestination(Vector3 destination)
     {
-        if (!TryGetDoorAhead(out DoorInteractable door))
+        if (Time.time < lastDoorInteractTime + doorInteractCooldown)
+            return false;
+
+        if (!TryGetBlockingDoorTowards(destination, out DoorInteractable door))
             return false;
 
         DoorController controller = door.GetDoorController();
@@ -1707,23 +1741,67 @@ public class SimpleNPCBrain : MonoBehaviour
 
         if (controller.IsOpen)
         {
+            pendingDoorTarget = null;
+            hasPendingDoorDestination = false;
             agent.ResetPath();
             RepathCurrentMovementDestination();
             ResetStallTimer();
             return true;
         }
 
-        if (Time.time < lastDoorInteractTime + doorInteractCooldown)
-            return false;
-
-        if (!door.CanInteract(gameObject))
-            return false;
-
-        door.Interact(gameObject);
-        lastDoorInteractTime = Time.time;
+        pendingDoorTarget = door;
+        pendingDoorDestination = destination;
+        hasPendingDoorDestination = true;
         agent.ResetPath();
-        RepathCurrentMovementDestination();
         ResetStallTimer();
+        return true;
+    }
+
+    private bool HandlePendingDoorTarget()
+    {
+        if (pendingDoorTarget == null)
+            return false;
+
+        DoorController controller = pendingDoorTarget.GetDoorController();
+        if (controller == null)
+        {
+            pendingDoorTarget = null;
+            hasPendingDoorDestination = false;
+            return false;
+        }
+
+        if (controller.IsOpen)
+        {
+            pendingDoorTarget = null;
+            Vector3 repathDestination = hasPendingDoorDestination ? pendingDoorDestination : transform.position;
+            hasPendingDoorDestination = false;
+            agent.ResetPath();
+            agent.SetDestination(repathDestination);
+            ResetStallTimer();
+            return true;
+        }
+
+        Vector3 doorPoint = pendingDoorTarget.GetInteractionPoint();
+        agent.speed = GetNeedMoveSpeed();
+        agent.SetDestination(doorPoint);
+
+        if (!agent.pathPending && agent.remainingDistance <= Mathf.Max(doorStopDistance, pendingDoorTarget.interactionRange))
+        {
+            if (Time.time < lastDoorInteractTime + doorInteractCooldown)
+                return true;
+
+            if (!pendingDoorTarget.CanInteract(gameObject))
+            {
+                pendingDoorTarget = null;
+                hasPendingDoorDestination = false;
+                return false;
+            }
+
+            pendingDoorTarget.Interact(gameObject);
+            lastDoorInteractTime = Time.time;
+            ResetStallTimer();
+        }
+
         return true;
     }
 
