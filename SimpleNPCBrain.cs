@@ -4,6 +4,20 @@ using UnityEngine.AI;
 
 public class SimpleNPCBrain : MonoBehaviour
 {
+    private enum InventoryUseAttempt
+    {
+        None,
+        WaitingForHandReady,
+        Used
+    }
+
+    private enum DoorUnlockAttempt
+    {
+        Failed,
+        WaitingForHandReady,
+        Unlocked
+    }
+
     public enum AIState
     {
         IdleWander,
@@ -104,6 +118,11 @@ public class SimpleNPCBrain : MonoBehaviour
     [Header("Inventory")]
     public NPCInventory npcInventory;
 
+    [Header("Hand Item Presentation")]
+    [SerializeField] private float handPreUseHoldDuration = 0.5f;
+    [SerializeField] private float handPostUseVisibleDelay = 0.4f;
+    [SerializeField] private float idleHandPocketDelay = 1.5f;
+
     [Header("Thought Logging")]
     [SerializeField] private NPCThoughtLogger thoughtLogger;
 
@@ -156,6 +175,11 @@ public class SimpleNPCBrain : MonoBehaviour
     private float lastMatchingLockedDoorKeyNarrationTime = -999f;
     private float invariantCheckTimer = 0f;
     private float lastInvariantWarningTime = -999f;
+    private float handItemReadyToUseTime = 0f;
+    private Interactable trackedHandItem;
+    private float trackedHandItemSinceTime = 0f;
+    private Interactable pendingPostUsePocketItem;
+    private float pendingPostUsePocketTime = -1f;
     private const float InvariantWarningCooldown = 2f;
 
     private void Start()
@@ -299,6 +323,8 @@ public class SimpleNPCBrain : MonoBehaviour
             HandleRestingState();
             break;
     }
+
+    HandleHandItemPresentation();
 }
 
     private bool IsCurrentAreaLit()
@@ -414,11 +440,22 @@ public class SimpleNPCBrain : MonoBehaviour
             return;
         }
 
-        if (currentNeedType == NeedType.Hunger && TryUseInventoryItemForNeed(NeedType.Hunger))
+        if (currentNeedType == NeedType.Hunger)
         {
-            Narrate("I have something for this. I'll use it.", "inventory-use-hunger");
-            AbortCurrentNeedAction();
-            return;
+            InventoryUseAttempt inventoryUse = TryUseInventoryItemForNeed(NeedType.Hunger);
+            if (inventoryUse == InventoryUseAttempt.Used)
+            {
+                Narrate("I have something for this. I'll use it.", "inventory-use-hunger");
+                AbortCurrentNeedAction();
+                return;
+            }
+
+            if (inventoryUse == InventoryUseAttempt.WaitingForHandReady)
+            {
+                if (agent.hasPath)
+                    agent.ResetPath();
+                return;
+            }
         }
 
         exploreRecheckTimer -= Time.deltaTime;
@@ -1466,32 +1503,45 @@ public class SimpleNPCBrain : MonoBehaviour
         ChangeState(AIState.IdleWander);
 }
 
-    private bool TryUseInventoryItemForNeed(NeedType needType)
+    private InventoryUseAttempt TryUseInventoryItemForNeed(NeedType needType)
     {
         if (npcInventory == null || !npcInventory.HasItemForNeed(needType))
-            return false;
+            return InventoryUseAttempt.None;
 
         Interactable handItem = npcInventory.GetHandItem();
         INeedSatisfier handSatisfier = handItem as INeedSatisfier;
-        if (handSatisfier != null && handSatisfier.GetNeedType() == needType && handItem.CanInteract(gameObject))
+        if (handSatisfier != null && handSatisfier.GetNeedType() == needType)
         {
+            if (!IsHandItemReadyToUse())
+                return InventoryUseAttempt.WaitingForHandReady;
+
+            if (!handItem.CanInteract(gameObject))
+                return InventoryUseAttempt.None;
+
             handItem.Interact(gameObject);
-            return true;
+            SchedulePostUsePocketingIfNeeded(handItem);
+            return InventoryUseAttempt.Used;
         }
 
         Interactable bestItem = npcInventory.GetBestItemForNeed(needType);
         if (bestItem == null)
-            return false;
+            return InventoryUseAttempt.None;
 
         if (!TryPrepareItemInHand(bestItem))
-            return false;
+        {
+            if (npcInventory.GetHandItem() == bestItem && !IsHandItemReadyToUse())
+                return InventoryUseAttempt.WaitingForHandReady;
+
+            return InventoryUseAttempt.None;
+        }
 
         Interactable preparedHandItem = npcInventory.GetHandItem();
         if (preparedHandItem == null || !preparedHandItem.CanInteract(gameObject))
-            return false;
+            return InventoryUseAttempt.None;
 
         preparedHandItem.Interact(gameObject);
-        return true;
+        SchedulePostUsePocketingIfNeeded(preparedHandItem);
+        return InventoryUseAttempt.Used;
     }
 
     private void ValidateRuntimeSetup()
@@ -1880,11 +1930,15 @@ public class SimpleNPCBrain : MonoBehaviour
             return false;
         }
 
-        if (TryUseInventoryKeyOnDoor(door))
+        DoorUnlockAttempt unlockAttempt = TryUseInventoryKeyOnDoor(door);
+        if (unlockAttempt == DoorUnlockAttempt.Unlocked)
         {
             door.Interact(gameObject);
             return controller.IsOpen;
         }
+
+        if (unlockAttempt == DoorUnlockAttempt.WaitingForHandReady)
+            return false;
 
         if (controller.IsLocked)
             RememberLockedDoor(door);
@@ -1892,33 +1946,40 @@ public class SimpleNPCBrain : MonoBehaviour
         return false;
     }
 
-    private bool TryUseInventoryKeyOnDoor(DoorInteractable door)
+    private DoorUnlockAttempt TryUseInventoryKeyOnDoor(DoorInteractable door)
     {
         if (door == null || npcInventory == null)
-            return false;
+            return DoorUnlockAttempt.Failed;
 
         DoorController controller = door.GetDoorController();
         if (controller == null || !controller.IsLocked)
-            return false;
+            return DoorUnlockAttempt.Failed;
 
         if (!npcInventory.TryGetMatchingKey(controller.RequiredKeyId, out IKeyItem key))
-            return false;
+            return DoorUnlockAttempt.Failed;
 
         Interactable keyInteractable = key as Interactable;
         if (keyInteractable != null && !TryPrepareItemInHand(keyInteractable))
-            return false;
+        {
+            if (npcInventory.GetHandItem() == keyInteractable && !IsHandItemReadyToUse())
+                return DoorUnlockAttempt.WaitingForHandReady;
+
+            return DoorUnlockAttempt.Failed;
+        }
 
         IKeyItem heldKey = npcInventory.GetHandItem() as IKeyItem;
         if (heldKey == null)
-            return false;
+            return DoorUnlockAttempt.Failed;
 
         bool unlocked = controller.TryUnlock(heldKey.GetKeyId());
         if (unlocked)
         {
+            SchedulePostUsePocketingIfNeeded(npcInventory.GetHandItem());
             Narrate("Good thing I kept this key. That lock is open now.", "door-unlock-success");
+            return DoorUnlockAttempt.Unlocked;
         }
 
-        return unlocked;
+        return DoorUnlockAttempt.Failed;
     }
 
     private bool TryPrepareItemInHand(Interactable desiredItem)
@@ -1927,12 +1988,112 @@ public class SimpleNPCBrain : MonoBehaviour
             return false;
 
         if (npcInventory.GetHandItem() == desiredItem)
-            return true;
+            return IsHandItemReadyToUse();
 
+        bool movedToHand = false;
         if (npcInventory.HasHandItem)
-            return npcInventory.TrySwapHandItemWithInventoryItem(desiredItem);
+            movedToHand = npcInventory.TrySwapHandItemWithInventoryItem(desiredItem);
+        else
+            movedToHand = npcInventory.TryMoveInventoryItemToHand(desiredItem) || npcInventory.TrySetHandItem(desiredItem);
 
-        return npcInventory.TryMoveInventoryItemToHand(desiredItem) || npcInventory.TrySetHandItem(desiredItem);
+        if (!movedToHand)
+            return false;
+
+        MarkHandItemDrawnForUse();
+        CancelPendingPostUsePocketing(desiredItem);
+        return false;
+    }
+
+    private void HandleHandItemPresentation()
+    {
+        if (npcInventory == null)
+            return;
+
+        Interactable currentHandItem = npcInventory.GetHandItem();
+
+        if (currentHandItem != trackedHandItem)
+        {
+            trackedHandItem = currentHandItem;
+            trackedHandItemSinceTime = Time.time;
+        }
+
+        ProcessPendingPostUsePocketing(currentHandItem);
+
+        if (currentState != AIState.IdleWander)
+            return;
+
+        if (currentHandItem == null || currentHandItem != trackedHandItem)
+            return;
+
+        if (pendingPostUsePocketItem == currentHandItem)
+            return;
+
+        if (!IsHandItemReadyToUse())
+            return;
+
+        if (Time.time - trackedHandItemSinceTime < Mathf.Max(0f, idleHandPocketDelay))
+            return;
+
+        npcInventory.TryMoveHandItemToInventory();
+    }
+
+    private void SchedulePostUsePocketingIfNeeded(Interactable usedItem)
+    {
+        if (npcInventory == null || usedItem == null)
+            return;
+
+        if (npcInventory.GetHandItem() != usedItem)
+            return;
+
+        float holdDuration = Mathf.Max(0f, handPostUseVisibleDelay);
+        pendingPostUsePocketItem = usedItem;
+        pendingPostUsePocketTime = Time.time + holdDuration;
+        handItemReadyToUseTime = Mathf.Max(handItemReadyToUseTime, pendingPostUsePocketTime);
+    }
+
+    private void ProcessPendingPostUsePocketing(Interactable currentHandItem)
+    {
+        if (pendingPostUsePocketItem == null || npcInventory == null)
+            return;
+
+        if (currentHandItem != pendingPostUsePocketItem)
+        {
+            pendingPostUsePocketItem = null;
+            pendingPostUsePocketTime = -1f;
+            return;
+        }
+
+        if (Time.time < pendingPostUsePocketTime || !IsHandItemReadyToUse())
+            return;
+
+        bool pocketed = npcInventory.TryMoveHandItemToInventory();
+        if (pocketed || npcInventory.GetHandItem() != pendingPostUsePocketItem)
+        {
+            pendingPostUsePocketItem = null;
+            pendingPostUsePocketTime = -1f;
+        }
+    }
+
+    private void CancelPendingPostUsePocketing(Interactable item)
+    {
+        if (item == null)
+            return;
+
+        if (pendingPostUsePocketItem != item)
+            return;
+
+        pendingPostUsePocketItem = null;
+        pendingPostUsePocketTime = -1f;
+    }
+
+    private void MarkHandItemDrawnForUse()
+    {
+        handItemReadyToUseTime = Time.time + Mathf.Max(0f, handPreUseHoldDuration);
+    }
+
+    private bool IsHandItemReadyToUse()
+    {
+        return Time.time >= handItemReadyToUseTime;
     }
 
     private void OnTriggerEnter(Collider other)
