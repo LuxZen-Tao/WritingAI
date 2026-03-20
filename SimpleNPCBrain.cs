@@ -18,14 +18,21 @@ public class SimpleNPCBrain : MonoBehaviour
         Unlocked
     }
 
-    private struct LockedDoorMission
+    private enum RouteSubgoalType
     {
+        LockedDoorKeyResolution
+    }
+
+    private struct RouteSubgoal
+    {
+        public RouteSubgoalType type;
         public DoorInteractable blockedDoor;
         public string requiredKeyId;
+        public Vector3 blockedDestination;
         public Vector3 originalDestination;
         public NeedType originatingNeedType;
         public bool originatedFromUrgentNeed;
-        public bool isActive;
+        public string debugLabel;
     }
 
     public enum AIState
@@ -200,16 +207,7 @@ public class SimpleNPCBrain : MonoBehaviour
     private Vector3 currentActivityLookPoint;
     private bool hasCurrentActivityLookPoint = false;
     private float currentActivityLookTimer = 0f;
-    private LockedDoorMission currentLockedDoorMission;
-    private bool hasLockedDoorMission = false;
-
-    private Vector3 activeMovementGoalPosition;
-    private bool hasActiveMovementGoal = false;
-    private float movementGoalStartTime = 0f;
-    private float movementGoalBestDistance = Mathf.Infinity;
-    private float movementLastProgressTime = 0f;
-    private int movementGoalRecoveryAttempts = 0;
-    private int movementPathFailureCount = 0;
+    private readonly List<RouteSubgoal> routeSubgoalStack = new List<RouteSubgoal>();
 
     private Vector3 activeMovementGoalPosition;
     private bool hasActiveMovementGoal = false;
@@ -337,7 +335,7 @@ public class SimpleNPCBrain : MonoBehaviour
             ChangeState(AIState.Explore);
         }
     }
-    else if (currentNeedActionIsUrgentDriven && IsGoalExecutionState(currentState) && currentState != AIState.Resting && !hasLockedDoorMission)
+    else if (currentNeedActionIsUrgentDriven && IsGoalExecutionState(currentState) && currentState != AIState.Resting && routeSubgoalStack.Count == 0)
     {
         Narrate("I feel okay again. Back to wandering.", "return-to-idle-no-urgent");
         AbortCurrentNeedAction();
@@ -354,6 +352,14 @@ public class SimpleNPCBrain : MonoBehaviour
             if (TryHandleOpportunisticNeed())
                 return;
         }
+    }
+
+    if (currentState != AIState.Resting &&
+        currentState != AIState.PerformingActivity &&
+        routeSubgoalStack.Count > 0 &&
+        TryProcessTopSubgoal())
+    {
+        return;
     }
 
     switch (currentState)
@@ -1609,7 +1615,7 @@ public class SimpleNPCBrain : MonoBehaviour
         hasExplorePoint = false;
         hasIdlePoint = false;
 
-        if (IsCurrentTargetMatchingLockedDoorMissionKey(interactedTarget) && TryResumeLockedDoorMission())
+        if (IsCurrentTargetMatchingTopSubgoalKey(interactedTarget) && TryProcessTopSubgoal())
             return;
 
         if (currentNeedActionIsUrgentDriven && IsNeedCurrentlySatisfied(currentNeedType))
@@ -2025,6 +2031,7 @@ private void HandleRestingState()
     private void AbortCurrentNeedAction()
     {
         DebugAbort("AbortCurrentNeedAction");
+        ClearAllSubgoals("aborted current need action");
 
         StopRestingSession();
         FinishActivitySession(true);
@@ -2044,6 +2051,7 @@ private void HandleRestingState()
 
     private void RestartNeedSearch()
     {
+        ClearAllSubgoals("priority switch restart");
         StopRestingSession();
         FinishActivitySession(true);
         ResetStallTimer();
@@ -3477,7 +3485,7 @@ private void HandleRestingState()
 
         if (controller.IsLocked && !HasMatchingInventoryKey(controller))
         {
-            StartLockedDoorMission(door, controller.RequiredKeyId, destination);
+            PushLockedDoorSubgoal(door, controller.RequiredKeyId, destination, destination, "blocked-route");
             RememberLockedDoor(door);
             if (TryAcquireMatchingKeyForLockedDoor(controller.RequiredKeyId))
                 return true;
@@ -3486,8 +3494,11 @@ private void HandleRestingState()
 
         if (controller.IsOpen)
         {
-            if (hasLockedDoorMission && currentLockedDoorMission.blockedDoor == door)
-                ClearLockedDoorMission("blocked door already open");
+            if (PeekCurrentSubgoal(out RouteSubgoal topSubgoal) && topSubgoal.blockedDoor == door)
+            {
+                PopCurrentSubgoal("blocked door already open");
+                TryResumeParentGoalAfterSubgoal();
+            }
 
             pendingDoorTarget = null;
             hasPendingDoorDestination = false;
@@ -3521,8 +3532,11 @@ private void HandleRestingState()
 
     if (controller.IsOpen)
     {
-        if (hasLockedDoorMission && currentLockedDoorMission.blockedDoor == pendingDoorTarget)
-            ClearLockedDoorMission("blocked door opened while pending");
+        if (PeekCurrentSubgoal(out RouteSubgoal topSubgoal) && topSubgoal.blockedDoor == pendingDoorTarget)
+        {
+            PopCurrentSubgoal("blocked door opened while pending");
+            TryResumeParentGoalAfterSubgoal();
+        }
 
         pendingDoorTarget = null;
         Vector3 repathDestination = hasPendingDoorDestination ? pendingDoorDestination : transform.position;
@@ -3558,7 +3572,8 @@ private void HandleRestingState()
             if (unlockAttempt == DoorUnlockAttempt.Failed)
             {
                 RememberLockedDoor(pendingDoorTarget);
-                StartLockedDoorMission(pendingDoorTarget, controller.RequiredKeyId, hasPendingDoorDestination ? pendingDoorDestination : transform.position);
+                Vector3 blockedDestination = hasPendingDoorDestination ? pendingDoorDestination : transform.position;
+                PushLockedDoorSubgoal(pendingDoorTarget, controller.RequiredKeyId, blockedDestination, blockedDestination, "unlock-failed");
 
                 if (TryAcquireMatchingKeyForLockedDoor(controller.RequiredKeyId))
                     return true;
@@ -3605,83 +3620,104 @@ private void HandleRestingState()
         return npcInventory.TryGetMatchingKey(controller.RequiredKeyId, out _);
     }
 
-    private void StartLockedDoorMission(DoorInteractable door, string requiredKeyId, Vector3 originalDestination)
+    private bool PushLockedDoorSubgoal(DoorInteractable door, string requiredKeyId, Vector3 blockedDestination, Vector3 originalDestination, string debugLabel = null)
     {
         if (door == null || string.IsNullOrWhiteSpace(requiredKeyId))
-            return;
+            return false;
 
-        currentLockedDoorMission = new LockedDoorMission
+        if (PeekCurrentSubgoal(out RouteSubgoal topSubgoal) &&
+            topSubgoal.blockedDoor == door &&
+            topSubgoal.requiredKeyId == requiredKeyId)
         {
+            return false;
+        }
+
+        if (HasSubgoalForDoor(door))
+            return false;
+
+        RouteSubgoal subgoal = new RouteSubgoal
+        {
+            type = RouteSubgoalType.LockedDoorKeyResolution,
             blockedDoor = door,
             requiredKeyId = requiredKeyId,
+            blockedDestination = blockedDestination,
             originalDestination = originalDestination,
             originatingNeedType = currentNeedType,
             originatedFromUrgentNeed = currentNeedActionIsUrgentDriven,
-            isActive = true
+            debugLabel = string.IsNullOrWhiteSpace(debugLabel) ? door.name : debugLabel
         };
-        hasLockedDoorMission = true;
-        DebugMovement($"Locked-door mission started: door={door.name}, key={requiredKeyId}, destination={originalDestination}");
-    }
 
-    private void ClearLockedDoorMission(string reason)
-    {
-        if (hasLockedDoorMission)
-            DebugMovement($"Locked-door mission cleared: {reason}");
-
-        hasLockedDoorMission = false;
-        currentLockedDoorMission = default;
-    }
-
-    private bool HasUsableLockedDoorMission()
-    {
-        if (!hasLockedDoorMission || !currentLockedDoorMission.isActive)
-            return false;
-
-        if (currentLockedDoorMission.blockedDoor == null || string.IsNullOrWhiteSpace(currentLockedDoorMission.requiredKeyId))
-        {
-            ClearLockedDoorMission("door or required key missing");
-            return false;
-        }
-
-        if (!currentLockedDoorMission.blockedDoor.isEnabled || !currentLockedDoorMission.blockedDoor.CanInteract(gameObject))
-        {
-            ClearLockedDoorMission("blocked door no longer interactable");
-            return false;
-        }
-
-        DoorController controller = currentLockedDoorMission.blockedDoor.GetDoorController();
-        if (controller == null)
-        {
-            ClearLockedDoorMission("door controller missing");
-            return false;
-        }
-
+        routeSubgoalStack.Add(subgoal);
+        DebugMovement($"Subgoal pushed: door={door.name}, key={requiredKeyId}, depth={routeSubgoalStack.Count}, label={subgoal.debugLabel}");
         return true;
     }
 
-    private bool IsCurrentTargetMatchingLockedDoorMissionKey(Interactable target)
+    private bool PeekCurrentSubgoal(out RouteSubgoal subgoal)
     {
-        if (!hasLockedDoorMission || target == null)
+        if (routeSubgoalStack.Count == 0)
+        {
+            subgoal = default;
+            return false;
+        }
+
+        subgoal = routeSubgoalStack[routeSubgoalStack.Count - 1];
+        return true;
+    }
+
+    private bool PopCurrentSubgoal(string reason)
+    {
+        if (routeSubgoalStack.Count == 0)
+            return false;
+
+        RouteSubgoal popped = routeSubgoalStack[routeSubgoalStack.Count - 1];
+        routeSubgoalStack.RemoveAt(routeSubgoalStack.Count - 1);
+        DebugMovement($"Subgoal popped: door={popped.blockedDoor?.name}, reason={reason}, remainingDepth={routeSubgoalStack.Count}");
+        return true;
+    }
+
+    private void ClearAllSubgoals(string reason)
+    {
+        if (routeSubgoalStack.Count == 0)
+            return;
+
+        DebugMovement($"Cleared all subgoals ({routeSubgoalStack.Count}): {reason}");
+        routeSubgoalStack.Clear();
+    }
+
+    private bool HasSubgoalForDoor(DoorInteractable door)
+    {
+        if (door == null)
+            return false;
+
+        for (int i = 0; i < routeSubgoalStack.Count; i++)
+        {
+            if (routeSubgoalStack[i].blockedDoor == door)
+                return true;
+        }
+
+        return false;
+    }
+
+    private bool IsTopSubgoalResolved(RouteSubgoal subgoal, DoorController controller)
+    {
+        return subgoal.blockedDoor == null || controller == null || controller.IsOpen || !controller.IsLocked;
+    }
+
+    private bool IsCurrentTargetMatchingTopSubgoalKey(Interactable target)
+    {
+        if (target == null || !PeekCurrentSubgoal(out RouteSubgoal subgoal))
             return false;
 
         if (!target.isEnabled || !target.CanInteract(gameObject))
             return false;
 
         IKeyItem keyItem = target as IKeyItem;
-        if (keyItem == null)
-            return false;
-
-        return keyItem.GetKeyId() == currentLockedDoorMission.requiredKeyId;
+        return keyItem != null && keyItem.GetKeyId() == subgoal.requiredKeyId;
     }
 
-    private bool IsInventoryReadyForLockedDoorMission(out DoorController controller)
+    private bool IsInventoryReadyForTopSubgoal(RouteSubgoal subgoal, out DoorController controller)
     {
-        controller = null;
-
-        if (!HasUsableLockedDoorMission())
-            return false;
-
-        controller = currentLockedDoorMission.blockedDoor.GetDoorController();
+        controller = subgoal.blockedDoor != null ? subgoal.blockedDoor.GetDoorController() : null;
         if (controller == null)
             return false;
 
@@ -3691,70 +3727,130 @@ private void HandleRestingState()
         return HasMatchingInventoryKey(controller);
     }
 
-    private bool TryResumeLockedDoorMission()
+    private bool TryProcessTopSubgoal()
     {
-        if (!HasUsableLockedDoorMission())
+        if (!PeekCurrentSubgoal(out RouteSubgoal subgoal))
             return false;
 
-        if (currentNeedActionIsUrgentDriven != currentLockedDoorMission.originatedFromUrgentNeed)
-            currentNeedActionIsUrgentDriven = currentLockedDoorMission.originatedFromUrgentNeed;
-        currentNeedType = currentLockedDoorMission.originatingNeedType;
+        currentNeedType = subgoal.originatingNeedType;
+        currentNeedActionIsUrgentDriven = subgoal.originatedFromUrgentNeed;
 
-        DoorController controller = currentLockedDoorMission.blockedDoor.GetDoorController();
-        if (controller == null)
+        if (subgoal.blockedDoor == null || string.IsNullOrWhiteSpace(subgoal.requiredKeyId))
         {
-            ClearLockedDoorMission("resume failed: door/controller invalid");
-            return false;
+            PopCurrentSubgoal("invalid top subgoal data");
+            return TryResumeParentGoalAfterSubgoal();
         }
 
-        if (controller.IsOpen || !controller.IsLocked)
+        if (!subgoal.blockedDoor.isEnabled || !subgoal.blockedDoor.CanInteract(gameObject))
         {
-            Vector3 destination = currentLockedDoorMission.originalDestination;
-            ClearLockedDoorMission("mission completed (door open)");
+            PopCurrentSubgoal("door no longer interactable");
+            return TryResumeParentGoalAfterSubgoal();
+        }
 
-            if (IsPathReachable(destination) || TryHandleDoorForDestination(destination))
+        DoorController controller = subgoal.blockedDoor.GetDoorController();
+        if (IsTopSubgoalResolved(subgoal, controller))
+        {
+            PopCurrentSubgoal("top subgoal resolved");
+            return TryResumeParentGoalAfterSubgoal();
+        }
+
+        if (!IsInventoryReadyForTopSubgoal(subgoal, out controller))
+        {
+            if (IsCurrentTargetMatchingTopSubgoalKey(currentTarget))
+                return true;
+
+            bool foundKey = TryAcquireMatchingKeyForLockedDoor(subgoal.requiredKeyId);
+            if (foundKey)
             {
-                BeginMovementGoal(destination);
-                agent.SetDestination(destination);
-                DebugMovement($"Locked-door mission completed. Resuming destination {destination}");
+                DebugMovement($"Subgoal key targeted: door={subgoal.blockedDoor.name}, key={subgoal.requiredKeyId}");
                 return true;
             }
 
-            RestartNeedSearch();
-            return false;
-        }
-
-        if (!IsInventoryReadyForLockedDoorMission(out _))
-        {
-            if (IsCurrentTargetMatchingLockedDoorMissionKey(currentTarget))
-                return true;
-
-            bool foundKey = TryAcquireMatchingKeyForLockedDoor(currentLockedDoorMission.requiredKeyId);
-            if (!foundKey)
+            if (currentTarget == null)
             {
-                DebugMovement("Locked-door mission key search failed this tick; keeping mission active.");
-                if (currentTarget == null)
-                {
-                    ClearLockedDoorMission("no reachable matching key found");
-                    RestartNeedSearch();
-                }
+                PopCurrentSubgoal("no reachable matching key found");
+                return TryResumeParentGoalAfterSubgoal();
             }
-            else
-                DebugMovement("Locked-door mission key targeted.");
 
-            return foundKey;
+            return true;
         }
 
-        pendingDoorTarget = currentLockedDoorMission.blockedDoor;
-        pendingDoorDestination = currentLockedDoorMission.originalDestination;
+        pendingDoorTarget = subgoal.blockedDoor;
+        pendingDoorDestination = subgoal.blockedDestination;
         hasPendingDoorDestination = true;
         hasExplorePoint = false;
         hasIdlePoint = false;
         if (currentState == AIState.IdleWander)
             ChangeState(AIState.Explore);
 
-        DebugMovement($"Locked-door mission resuming to blocked door {pendingDoorTarget.name}");
+        DebugMovement($"Resuming subgoal for door={subgoal.blockedDoor.name}, depth={routeSubgoalStack.Count}");
         return true;
+    }
+
+    private bool TryResumeParentGoalAfterSubgoal()
+    {
+        if (PeekCurrentSubgoal(out RouteSubgoal parentSubgoal))
+        {
+            DebugMovement($"Returning to parent subgoal for door={parentSubgoal.blockedDoor?.name}");
+            return TryProcessTopSubgoal();
+        }
+
+        if (TryGetCurrentRouteObjective(out Vector3 destination))
+        {
+            if (IsPathReachable(destination) || TryHandleDoorForDestination(destination))
+            {
+                BeginMovementGoal(destination);
+                agent.SetDestination(destination);
+                DebugMovement($"Subgoal stack cleared. Resuming base route destination {destination}");
+                return true;
+            }
+        }
+
+        if (HasUrgentNeed())
+            ChangeState(AIState.Explore);
+        else
+            ChangeState(AIState.IdleWander);
+
+        return false;
+    }
+
+    private bool TryGetCurrentRouteObjective(out Vector3 destination)
+    {
+        if (currentState == AIState.MoveToTarget && currentTarget != null)
+        {
+            destination = currentTarget.GetInteractionPoint();
+            return true;
+        }
+
+        if (currentState == AIState.MoveToRememberedTarget)
+        {
+            if (currentComfortZoneTarget != null)
+            {
+                destination = currentComfortZoneTarget.lastKnownPosition;
+                return true;
+            }
+
+            if (currentMemoryTarget != null)
+            {
+                destination = currentMemoryTarget.lastKnownPosition;
+                return true;
+            }
+        }
+
+        if (currentState == AIState.Explore && hasExplorePoint)
+        {
+            destination = currentExplorePoint;
+            return true;
+        }
+
+        if (hasPendingDoorDestination)
+        {
+            destination = pendingDoorDestination;
+            return true;
+        }
+
+        destination = transform.position;
+        return false;
     }
 
     private bool TryAcquireMatchingKeyForLockedDoor(string requiredKeyId)
@@ -3797,10 +3893,10 @@ private void HandleRestingState()
         currentComfortZoneTarget = null;
         hasExplorePoint = false;
         hasIdlePoint = false;
-        if (hasLockedDoorMission)
+        if (PeekCurrentSubgoal(out RouteSubgoal topSubgoal))
         {
-            currentNeedType = currentLockedDoorMission.originatingNeedType;
-            currentNeedActionIsUrgentDriven = currentLockedDoorMission.originatedFromUrgentNeed;
+            currentNeedType = topSubgoal.originatingNeedType;
+            currentNeedActionIsUrgentDriven = topSubgoal.originatedFromUrgentNeed;
         }
         else
         {
@@ -3818,15 +3914,15 @@ private void HandleRestingState()
             if (isVisibleKey)
             {
                 Narrate("I can see the key I need. Going to get it.", "key-retrieval-visible");
-                if (hasLockedDoorMission)
-                    DebugMovement("Locked-door mission key targeted from visible key.");
+                if (routeSubgoalStack.Count > 0)
+                    DebugMovement("Subgoal key targeted from visible key.");
                 ChangeState(AIState.MoveToTarget);
             }
             else
             {
                 Narrate("I remember seeing a key that could open that door.", "key-retrieval-remembered");
-                if (hasLockedDoorMission)
-                    DebugMovement("Locked-door mission key targeted from memory.");
+                if (routeSubgoalStack.Count > 0)
+                    DebugMovement("Subgoal key targeted from memory.");
                 ChangeState(AIState.MoveToRememberedTarget);
             }
 
