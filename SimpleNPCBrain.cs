@@ -25,7 +25,8 @@ public class SimpleNPCBrain : MonoBehaviour
         MoveToTarget,
         MoveToRememberedTarget,
         InteractWithTarget,
-        Resting
+        Resting,
+        PerformingActivity
     }
 
     [Header("State")]
@@ -92,6 +93,11 @@ public class SimpleNPCBrain : MonoBehaviour
     public float idleDoorSearchRadius = 2f;
     public float idleDoorSearchCooldown = 1f;
     private float lastIdleDoorSearchTime = -999f;
+
+    [Header("Downtime Activities")]
+    public float downtimeActivitySearchRadius = 5f;
+    public float downtimeActivityCheckInterval = 1f;
+    private float downtimeActivityCheckTimer = 0f;
 
     [Header("Memory - Interactables")]
     public List<RememberedInteractable> memory = new List<RememberedInteractable>();
@@ -168,6 +174,12 @@ public class SimpleNPCBrain : MonoBehaviour
     private float currentRestHoldTime = 0f;
     private Transform currentRestAnchor;
     private float currentRestAnchorSnapDistance = 0.35f;
+    private IActivityInteractable currentActivityInteractable;
+    private float currentActivityElapsed = 0f;
+    private float currentActivityDuration = 0f;
+    private Vector3 currentActivityLookPoint;
+    private bool hasCurrentActivityLookPoint = false;
+    private float currentActivityLookTimer = 0f;
 
     private readonly Dictionary<NeedType, NeedsManager.NeedUrgencyBand> lastNeedBands = new Dictionary<NeedType, NeedsManager.NeedUrgencyBand>();
     private readonly Dictionary<NeedType, bool> lastNeedUrgentFlags = new Dictionary<NeedType, bool>();
@@ -220,6 +232,7 @@ public class SimpleNPCBrain : MonoBehaviour
         hasIdlePoint = false;
         idlePauseTimer = idlePauseDuration;
         opportunisticCheckTimer = Random.Range(0f, opportunisticCheckInterval);
+        downtimeActivityCheckTimer = Random.Range(0f, Mathf.Max(0.2f, downtimeActivityCheckInterval));
         invariantCheckTimer = Random.Range(0f, Mathf.Max(0.2f, invariantCheckInterval));
         ValidateRuntimeSetup();
         
@@ -252,7 +265,7 @@ public class SimpleNPCBrain : MonoBehaviour
 
         currentNeedActionIsUrgentDriven = true;
 
-        if (needChanged && IsGoalExecutionState(currentState) && currentState != AIState.Resting)
+        if (needChanged && IsGoalExecutionState(currentState) && currentState != AIState.Resting && CanInterruptCurrentActionForUrgentNeed())
         {
             Narrate(Pick(
                 "Something else is more urgent now. I need to switch priorities.",
@@ -264,7 +277,7 @@ public class SimpleNPCBrain : MonoBehaviour
 
         if (currentNeedActionIsUrgentDriven && IsNeedCurrentlySatisfied(currentNeedType))
         {
-            if (IsGoalExecutionState(currentState) && currentState != AIState.Resting)
+            if (IsGoalExecutionState(currentState) && currentState != AIState.Resting && CanInterruptCurrentActionForUrgentNeed())
             {
                 Narrate(Pick(
                     "Okay, that's better.",
@@ -323,6 +336,10 @@ public class SimpleNPCBrain : MonoBehaviour
         case AIState.Resting:
             HandleRestingState();
             break;
+
+        case AIState.PerformingActivity:
+            HandlePerformingActivityState();
+            break;
     }
 
     HandleHandItemPresentation();
@@ -358,7 +375,19 @@ public class SimpleNPCBrain : MonoBehaviour
                state == AIState.MoveToTarget ||
                state == AIState.MoveToRememberedTarget ||
                state == AIState.InteractWithTarget ||
-               state == AIState.Resting;
+               state == AIState.Resting ||
+               state == AIState.PerformingActivity;
+    }
+
+    private bool CanInterruptCurrentActionForUrgentNeed()
+    {
+        if (currentState != AIState.PerformingActivity)
+            return true;
+
+        if (currentActivityInteractable == null)
+            return true;
+
+        return currentActivityInteractable.IsInterruptible();
     }
 
     private bool IsNeedDrivenState(AIState state)
@@ -375,6 +404,9 @@ public class SimpleNPCBrain : MonoBehaviour
     {
         ResetStallTimer();
         agent.speed = idleMoveSpeed;
+
+        if (TryStartDowntimeActivity())
+            return;
 
         if (idlePauseTimer > 0f)
         {
@@ -958,6 +990,12 @@ public class SimpleNPCBrain : MonoBehaviour
             if (interactable is INeedSatisfier satisfier)
             {
                 RememberInteractable(interactable, satisfier.GetNeedType());
+                continue;
+            }
+
+            if (interactable is IActivityInteractable activity)
+            {
+                RememberActivityInteractable(interactable, activity.GetActivityType());
             }
         }
     }
@@ -968,6 +1006,141 @@ public class SimpleNPCBrain : MonoBehaviour
             return;
 
         RememberInteractable(keyInteractable, NeedType.Key);
+    }
+
+    private void RememberActivityInteractable(Interactable activityInteractable, ActivityType activityType)
+    {
+        if (activityInteractable == null)
+            return;
+
+        RememberInteractable(activityInteractable, NeedType.Key, true, activityType);
+    }
+
+    private bool TryStartDowntimeActivity()
+    {
+        if (HasUrgentNeed())
+            return false;
+
+        if (currentNeedActionIsUrgentDriven)
+            return false;
+
+        downtimeActivityCheckTimer -= Time.deltaTime;
+        if (downtimeActivityCheckTimer > 0f)
+            return false;
+
+        downtimeActivityCheckTimer = Mathf.Max(0.2f, downtimeActivityCheckInterval);
+
+        if (TryAcquireVisibleActivityTarget(downtimeActivitySearchRadius))
+            return true;
+
+        return TryUseRememberedActivityTarget(downtimeActivitySearchRadius);
+    }
+
+    private bool TryAcquireVisibleActivityTarget(float maxDistance)
+    {
+        List<Interactable> visibleInteractables = perceptionService.GetVisibleInteractables(transform, transform.forward);
+        Interactable bestTarget = null;
+        float bestScore = float.MinValue;
+        float bestDistance = Mathf.Infinity;
+
+        for (int i = 0; i < visibleInteractables.Count; i++)
+        {
+            Interactable interactable = visibleInteractables[i];
+            if (!(interactable is IActivityInteractable activity))
+                continue;
+
+            if (!interactable.isEnabled || !interactable.CanInteract(gameObject))
+                continue;
+
+            float distance = Vector3.Distance(transform.position, interactable.GetInteractionPoint());
+            if (distance > maxDistance)
+                continue;
+
+            float score = activity.GetDesirability() / (1f + distance);
+            if (score > bestScore || (Mathf.Approximately(score, bestScore) && distance < bestDistance))
+            {
+                bestTarget = interactable;
+                bestScore = score;
+                bestDistance = distance;
+            }
+        }
+
+        if (bestTarget == null)
+            return false;
+
+        IActivityInteractable bestActivity = bestTarget as IActivityInteractable;
+        RememberActivityInteractable(bestTarget, bestActivity.GetActivityType());
+        if (!BeginDowntimeTargetMove(bestTarget, null))
+            return false;
+
+        Narrate("That looks fun for a quick break.", "activity-visible-target");
+        return true;
+    }
+
+    private bool TryUseRememberedActivityTarget(float maxDistance)
+    {
+        ForgetInvalidMemories();
+
+        RememberedInteractable bestMemory = null;
+        float bestScore = float.MinValue;
+        float bestDistance = Mathf.Infinity;
+
+        for (int i = 0; i < memory.Count; i++)
+        {
+            RememberedInteractable remembered = memory[i];
+            if (remembered == null || remembered.interactable == null)
+                continue;
+
+            if (!remembered.isActivity)
+                continue;
+
+            if (!(remembered.interactable is IActivityInteractable activity))
+                continue;
+
+            if (!remembered.interactable.isEnabled || !remembered.interactable.CanInteract(gameObject))
+                continue;
+
+            float distance = Vector3.Distance(transform.position, remembered.lastKnownPosition);
+            if (distance > maxDistance)
+                continue;
+
+            float score = activity.GetDesirability() / (1f + distance);
+            if (score > bestScore || (Mathf.Approximately(score, bestScore) && distance < bestDistance))
+            {
+                bestMemory = remembered;
+                bestScore = score;
+                bestDistance = distance;
+            }
+        }
+
+        if (bestMemory == null)
+            return false;
+
+        if (!BeginDowntimeTargetMove(bestMemory.interactable, bestMemory))
+            return false;
+
+        Narrate("I remember something fun nearby.", "activity-remembered-target");
+        return true;
+    }
+
+    private bool BeginDowntimeTargetMove(Interactable interactable, RememberedInteractable remembered)
+    {
+        currentTarget = interactable;
+        currentMemoryTarget = remembered;
+        currentComfortZoneTarget = null;
+        hasExplorePoint = false;
+        hasIdlePoint = false;
+        agent.ResetPath();
+
+        Vector3 targetPosition = remembered != null ? remembered.lastKnownPosition : interactable.GetInteractionPoint();
+        if (!IsPathReachable(targetPosition) && !TryHandleDoorForDestination(targetPosition))
+        {
+            ClearActiveTargets();
+            return false;
+        }
+
+        ChangeState(remembered != null ? AIState.MoveToRememberedTarget : AIState.MoveToTarget);
+        return true;
     }
 
     private bool TryAcquireVisibleTarget(NeedType needType, float maxDistance = Mathf.Infinity)
@@ -1016,6 +1189,9 @@ public class SimpleNPCBrain : MonoBehaviour
                 continue;
 
             if (remembered.needType != needType)
+                continue;
+
+            if (remembered.isActivity)
                 continue;
 
             if (remembered.interactable is IKeyItem)
@@ -1276,6 +1452,31 @@ public class SimpleNPCBrain : MonoBehaviour
 
         if (currentTarget.CanInteract(gameObject))
         {
+            if (currentTarget is IActivityInteractable activityTarget)
+            {
+                if (activityTarget.BeginActivity(gameObject))
+                {
+                    currentActivityInteractable = activityTarget;
+                    currentActivityElapsed = 0f;
+                    float minDuration = activityTarget.GetMinimumUseDuration();
+                    float maxDuration = activityTarget.GetMaximumUseDuration();
+                    currentActivityDuration = Random.Range(minDuration, Mathf.Max(minDuration, maxDuration));
+                    hasCurrentActivityLookPoint = false;
+                    currentActivityLookTimer = 0f;
+
+                    Vector3 activityAnchor = activityTarget.GetActivityAnchorPoint();
+                    float anchorDistance = Vector3.Distance(transform.position, activityAnchor);
+                    if (anchorDistance > 0.2f)
+                    {
+                        agent.Warp(activityAnchor);
+                    }
+
+                    Narrate("I'll spend a bit of time here.", "activity-start");
+                    ChangeState(AIState.PerformingActivity);
+                    return;
+                }
+            }
+
             bool handledAsPickup = false;
 
             IPickupable pickupable = currentTarget as IPickupable;
@@ -1421,7 +1622,7 @@ public class SimpleNPCBrain : MonoBehaviour
         return false;
     }
 
-    private void HandleRestingState()
+private void HandleRestingState()
 {
     ResetStallTimer();
     agent.ResetPath();
@@ -1503,6 +1704,83 @@ public class SimpleNPCBrain : MonoBehaviour
     else
         ChangeState(AIState.IdleWander);
 }
+
+    private void HandlePerformingActivityState()
+    {
+        ResetStallTimer();
+        agent.ResetPath();
+
+        if (currentActivityInteractable == null)
+        {
+            FinishActivitySession(false);
+            return;
+        }
+
+        Interactable activityInteractable = currentActivityInteractable as Interactable;
+        if (activityInteractable == null || !activityInteractable.isEnabled || !activityInteractable.CanInteract(gameObject))
+        {
+            Narrate("This activity isn't available anymore.", "activity-unavailable");
+            FinishActivitySession(false);
+            return;
+        }
+
+        if (HasUrgentNeed() && currentActivityInteractable.IsInterruptible())
+        {
+            Narrate("I need to handle something urgent first.", "activity-interrupted-urgent");
+            FinishActivitySession(true);
+            RestartNeedSearch();
+            return;
+        }
+
+        Vector3 anchorPosition = currentActivityInteractable.GetActivityAnchorPoint();
+        if (Vector3.Distance(transform.position, anchorPosition) > 0.15f)
+        {
+            agent.Warp(anchorPosition);
+        }
+
+        UpdateObservationZoneLookBehavior();
+
+        currentActivityElapsed += Time.deltaTime;
+        if (currentActivityElapsed < currentActivityDuration)
+            return;
+
+        Narrate("That was enough downtime. Back to wandering.", "activity-complete");
+        FinishActivitySession(true);
+        ChangeState(AIState.IdleWander);
+    }
+
+    private void UpdateObservationZoneLookBehavior()
+    {
+        ObservationZoneInteractable observationZone = currentActivityInteractable as ObservationZoneInteractable;
+        if (observationZone == null)
+            return;
+
+        if (!observationZone.IsInsideZone(transform.position))
+        {
+            Vector3 anchor = observationZone.GetActivityAnchorPoint();
+            if (Vector3.Distance(transform.position, anchor) > 0.15f)
+                agent.Warp(anchor);
+        }
+
+        currentActivityLookTimer -= Time.deltaTime;
+        if (currentActivityLookTimer > 0f && hasCurrentActivityLookPoint)
+        {
+            FaceTowardsPoint(currentActivityLookPoint);
+            return;
+        }
+
+        if (observationZone.TryGetNextLookPoint(out Vector3 nextLookPoint))
+        {
+            currentActivityLookPoint = nextLookPoint;
+            hasCurrentActivityLookPoint = true;
+            currentActivityLookTimer = observationZone.GetNextLookDwellDuration();
+            FaceTowardsPoint(currentActivityLookPoint);
+            return;
+        }
+
+        hasCurrentActivityLookPoint = false;
+        currentActivityLookTimer = 0f;
+    }
 
     private InventoryUseAttempt TryUseInventoryItemForNeed(NeedType needType)
     {
@@ -1677,6 +1955,7 @@ public class SimpleNPCBrain : MonoBehaviour
         DebugAbort("AbortCurrentNeedAction");
 
         StopRestingSession();
+        FinishActivitySession(true);
         ResetStallTimer();
         currentTarget = null;
         currentMemoryTarget = null;
@@ -1694,6 +1973,7 @@ public class SimpleNPCBrain : MonoBehaviour
     private void RestartNeedSearch()
     {
         StopRestingSession();
+        FinishActivitySession(true);
         ResetStallTimer();
         currentTarget = null;
         currentMemoryTarget = null;
@@ -1723,6 +2003,27 @@ public class SimpleNPCBrain : MonoBehaviour
         hasRestAnchor = false;
         currentRestAnchorPosition = Vector3.zero;
         currentRestHoldTimer = 0f;
+    }
+
+    private void FinishActivitySession(bool clearTarget)
+    {
+        if (currentActivityInteractable != null)
+            currentActivityInteractable.EndActivity(gameObject);
+
+        currentActivityInteractable = null;
+        currentActivityElapsed = 0f;
+        currentActivityDuration = 0f;
+        hasCurrentActivityLookPoint = false;
+        currentActivityLookTimer = 0f;
+
+        if (!clearTarget)
+            return;
+
+        currentTarget = null;
+        currentMemoryTarget = null;
+        currentComfortZoneTarget = null;
+        hasExplorePoint = false;
+        hasIdlePoint = false;
     }
 
     private void CommitToRestAnchor(bool forceSnap)
@@ -1797,6 +2098,7 @@ public class SimpleNPCBrain : MonoBehaviour
                 break;
 
             case AIState.Resting:
+            case AIState.PerformingActivity:
                 if (agent.hasPath)
                     agent.ResetPath();
                 break;
@@ -1805,9 +2107,9 @@ public class SimpleNPCBrain : MonoBehaviour
         Narrate(GetStateTransitionThought(previousState, currentState), "state-change-" + previousState + "-" + currentState);
     }
 
-    private void RememberInteractable(Interactable interactable, NeedType needType)
+    private void RememberInteractable(Interactable interactable, NeedType needType, bool isActivity = false, ActivityType activityType = ActivityType.Generic)
     {
-        NpcMemoryService.MemoryWriteResult writeResult = memoryService.RememberInteractable(memory, interactable, needType, Time.time);
+        NpcMemoryService.MemoryWriteResult writeResult = memoryService.RememberInteractable(memory, interactable, needType, Time.time, isActivity, activityType);
         if (writeResult == NpcMemoryService.MemoryWriteResult.Updated)
             Narrate("I've seen this before.", "memory-update-interactable-" + interactable.GetInstanceID());
         else if (writeResult == NpcMemoryService.MemoryWriteResult.Added)
@@ -3147,8 +3449,28 @@ public class SimpleNPCBrain : MonoBehaviour
         }
     }
 
+    private void FaceTowardsPoint(Vector3 point)
+    {
+        Vector3 flatDirection = point - transform.position;
+        flatDirection.y = 0f;
+
+        if (flatDirection.sqrMagnitude < 0.0001f)
+            return;
+
+        Quaternion targetRotation = Quaternion.LookRotation(flatDirection.normalized);
+        transform.rotation = Quaternion.Slerp(transform.rotation, targetRotation, Time.deltaTime * 6f);
+    }
+
     private void ClearActiveTargets()
     {
+        if (currentActivityInteractable != null)
+            currentActivityInteractable.EndActivity(gameObject);
+
+        currentActivityInteractable = null;
+        currentActivityElapsed = 0f;
+        currentActivityDuration = 0f;
+        hasCurrentActivityLookPoint = false;
+        currentActivityLookTimer = 0f;
         currentTarget = null;
         currentMemoryTarget = null;
         currentComfortZoneTarget = null;

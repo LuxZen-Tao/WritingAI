@@ -18,7 +18,13 @@ public class NpcMemoryService
         Added
     }
 
-    public MemoryWriteResult RememberInteractable(List<RememberedInteractable> memory, Interactable interactable, NeedType needType, float now)
+    public MemoryWriteResult RememberInteractable(
+        List<RememberedInteractable> memory,
+        Interactable interactable,
+        NeedType needType,
+        float now,
+        bool isActivity = false,
+        ActivityType activityType = ActivityType.Generic)
     {
         if (memory == null || interactable == null)
             return MemoryWriteResult.None;
@@ -30,11 +36,13 @@ public class NpcMemoryService
 
             memory[i].lastKnownPosition = interactable.GetInteractionPoint();
             memory[i].needType = needType;
+            memory[i].isActivity = isActivity;
+            memory[i].activityType = activityType;
             memory[i].lastSeenTime = now;
             return MemoryWriteResult.Updated;
         }
 
-        memory.Add(new RememberedInteractable(interactable, needType, interactable.GetInteractionPoint(), now));
+        memory.Add(new RememberedInteractable(interactable, needType, interactable.GetInteractionPoint(), now, isActivity, activityType));
         return MemoryWriteResult.Added;
     }
 
