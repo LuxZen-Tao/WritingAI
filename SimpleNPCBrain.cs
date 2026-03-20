@@ -217,6 +217,14 @@ public class SimpleNPCBrain : MonoBehaviour
     private int movementGoalRecoveryAttempts = 0;
     private int movementPathFailureCount = 0;
 
+    private Vector3 activeMovementGoalPosition;
+    private bool hasActiveMovementGoal = false;
+    private float movementGoalStartTime = 0f;
+    private float movementGoalBestDistance = Mathf.Infinity;
+    private float movementLastProgressTime = 0f;
+    private int movementGoalRecoveryAttempts = 0;
+    private int movementPathFailureCount = 0;
+
     private readonly Dictionary<NeedType, NeedsManager.NeedUrgencyBand> lastNeedBands = new Dictionary<NeedType, NeedsManager.NeedUrgencyBand>();
     private readonly Dictionary<NeedType, bool> lastNeedUrgentFlags = new Dictionary<NeedType, bool>();
     private float lastOpportunisticComfortLightTime = -999f;
