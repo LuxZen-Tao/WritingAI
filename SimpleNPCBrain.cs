@@ -18,6 +18,16 @@ public class SimpleNPCBrain : MonoBehaviour
         Unlocked
     }
 
+    private struct LockedDoorMission
+    {
+        public DoorInteractable blockedDoor;
+        public string requiredKeyId;
+        public Vector3 originalDestination;
+        public NeedType originatingNeedType;
+        public bool originatedFromUrgentNeed;
+        public bool isActive;
+    }
+
     public enum AIState
     {
         IdleWander,
@@ -63,6 +73,15 @@ public class SimpleNPCBrain : MonoBehaviour
     [Header("Movement Stall Detection")]
     public float stallVelocityThreshold = 0.1f;
     public float stallTimeThreshold = 0.75f;
+    public float movementProgressDistanceThreshold = 0.2f;
+    public float movementProgressPathDistanceThreshold = 0.2f;
+    public float movementNoProgressTimeout = 2.25f;
+    public float movementGoalTimeout = 12f;
+    public int maxMovementRecoveryAttempts = 4;
+    public float movementRecoverySampleRadius = 1.5f;
+    public float movementRecoveryUnstuckRadius = 1.0f;
+    public float movementPointClearanceRadius = 0.35f;
+    public int movementPathFailureLimit = 3;
     private float stallTimer = 0f;
 
     [Header("Door Probe")]
@@ -134,6 +153,7 @@ public class SimpleNPCBrain : MonoBehaviour
 
     [Header("Debug")]
     [SerializeField] private bool debugOpportunisticFlow = true;
+    [SerializeField] private bool debugMovementRecovery = false;
     [SerializeField] private bool enableInvariantChecks = true;
     [SerializeField] private float invariantCheckInterval = 1f;
     [SerializeField] private bool logSetupValidation = true;
@@ -180,6 +200,16 @@ public class SimpleNPCBrain : MonoBehaviour
     private Vector3 currentActivityLookPoint;
     private bool hasCurrentActivityLookPoint = false;
     private float currentActivityLookTimer = 0f;
+    private LockedDoorMission currentLockedDoorMission;
+    private bool hasLockedDoorMission = false;
+
+    private Vector3 activeMovementGoalPosition;
+    private bool hasActiveMovementGoal = false;
+    private float movementGoalStartTime = 0f;
+    private float movementGoalBestDistance = Mathf.Infinity;
+    private float movementLastProgressTime = 0f;
+    private int movementGoalRecoveryAttempts = 0;
+    private int movementPathFailureCount = 0;
 
     private readonly Dictionary<NeedType, NeedsManager.NeedUrgencyBand> lastNeedBands = new Dictionary<NeedType, NeedsManager.NeedUrgencyBand>();
     private readonly Dictionary<NeedType, bool> lastNeedUrgentFlags = new Dictionary<NeedType, bool>();
@@ -253,6 +283,13 @@ public class SimpleNPCBrain : MonoBehaviour
     PassiveObserveVisibleInteractables();
     PassiveObserveVisibleComfortZones();
 
+    if (currentState != AIState.Resting &&
+        currentState != AIState.PerformingActivity &&
+        TryResumeLockedDoorMission())
+    {
+        return;
+    }
+
     if (needsManager.HasUrgentNeed(out NeedType mostUrgentNeed))
     {
         bool needChanged = mostUrgentNeed != currentNeedType;
@@ -292,7 +329,7 @@ public class SimpleNPCBrain : MonoBehaviour
             ChangeState(AIState.Explore);
         }
     }
-    else if (currentNeedActionIsUrgentDriven && IsGoalExecutionState(currentState) && currentState != AIState.Resting)
+    else if (currentNeedActionIsUrgentDriven && IsGoalExecutionState(currentState) && currentState != AIState.Resting && !hasLockedDoorMission)
     {
         Narrate("I feel okay again. Back to wandering.", "return-to-idle-no-urgent");
         AbortCurrentNeedAction();
@@ -557,21 +594,24 @@ public class SimpleNPCBrain : MonoBehaviour
                 exploreTimer = 0f;
                 currentExploreDoorRouteAttempts = 0;
                 agent.ResetPath();
+                ClearMovementGoal();
             }
 
             return;
         }
 
+        BeginMovementGoal(currentExplorePoint);
         agent.SetDestination(currentExplorePoint);
         currentExploreDoorRouteAttempts = 0;
 
-        if (IsStalled())
+        if (TryRecoverMovementGoal(currentExplorePoint, "ExplorePoint"))
         {
             RememberLocation(currentExplorePoint);
             Narrate("I can't move through here. I'll try another route.", "explore-stalled-fallback");
             hasExplorePoint = false;
             exploreTimer = 0f;
             agent.ResetPath();
+            ClearMovementGoal();
             return;
         }
 
@@ -582,6 +622,7 @@ public class SimpleNPCBrain : MonoBehaviour
             hasExplorePoint = false;
             exploreTimer = 0f;
             agent.ResetPath();
+            ClearMovementGoal();
             return;
         }
 
@@ -592,6 +633,7 @@ public class SimpleNPCBrain : MonoBehaviour
             hasExplorePoint = false;
             exploreTimer = 0f;
             agent.ResetPath();
+            ClearMovementGoal();
         }
     }
 
@@ -613,6 +655,9 @@ public class SimpleNPCBrain : MonoBehaviour
                 continue;
 
             if (IsRecentlyVisited(navHit.position))
+                continue;
+
+            if (!HasPointClearance(navHit.position))
                 continue;
 
             if (IsPathReachable(navHit.position))
@@ -701,6 +746,9 @@ public class SimpleNPCBrain : MonoBehaviour
             if (!room.ContainsPoint(navHit.position))
                 continue;
 
+            if (!HasPointClearance(navHit.position))
+                continue;
+
             if (!IsPathReachable(navHit.position))
                 continue;
 
@@ -726,6 +774,9 @@ public class SimpleNPCBrain : MonoBehaviour
             if (currentRoom != null && currentRoom.ContainsPoint(navHit.position))
                 continue;
 
+            if (!HasPointClearance(navHit.position))
+                continue;
+
             if (!IsPathReachable(navHit.position))
                 continue;
 
@@ -746,6 +797,9 @@ public class SimpleNPCBrain : MonoBehaviour
                 continue;
 
             if (!NavMesh.SamplePosition(candidate, out NavMeshHit navHit, 2f, NavMesh.AllAreas))
+                continue;
+
+            if (!HasPointClearance(navHit.position))
                 continue;
 
             if (!IsPathReachable(navHit.position))
@@ -1277,9 +1331,10 @@ public class SimpleNPCBrain : MonoBehaviour
 
         agent.speed = GetActionMoveSpeed();
         Vector3 targetPosition = currentTarget.GetInteractionPoint();
+        BeginMovementGoal(targetPosition);
         agent.SetDestination(targetPosition);
 
-        if (IsStalled())
+        if (TryRecoverMovementGoal(targetPosition, "CurrentTarget"))
         {
             if (TryHandleDoorForDestination(targetPosition))
                 return;
@@ -1301,6 +1356,7 @@ public class SimpleNPCBrain : MonoBehaviour
 
         if (!agent.pathPending && agent.remainingDistance <= currentTarget.interactionRange)
         {
+            ClearMovementGoal();
             ChangeState(AIState.InteractWithTarget);
         }
     }
@@ -1335,9 +1391,10 @@ public class SimpleNPCBrain : MonoBehaviour
             }
 
             agent.speed = GetActionMoveSpeed();
+            BeginMovementGoal(currentComfortZoneTarget.lastKnownPosition);
             agent.SetDestination(currentComfortZoneTarget.lastKnownPosition);
 
-            if (IsStalled())
+            if (TryRecoverMovementGoal(currentComfortZoneTarget.lastKnownPosition, "RememberedComfortZone"))
             {
                 if (TryHandleDoorForDestination(currentComfortZoneTarget.lastKnownPosition))
                     return;
@@ -1360,6 +1417,7 @@ public class SimpleNPCBrain : MonoBehaviour
 
             if (!agent.pathPending && agent.remainingDistance <= rememberedComfortZoneStopDistance)
             {
+                ClearMovementGoal();
                 if (IsNeedCurrentlySatisfied(NeedType.Comfort))
                 {
                     Narrate("Much better.", "move-remembered-comfort-solved");
@@ -1389,9 +1447,10 @@ public class SimpleNPCBrain : MonoBehaviour
             return;
 
         agent.speed = GetActionMoveSpeed();
+        BeginMovementGoal(currentMemoryTarget.lastKnownPosition);
         agent.SetDestination(currentMemoryTarget.lastKnownPosition);
 
-        if (IsStalled())
+        if (TryRecoverMovementGoal(currentMemoryTarget.lastKnownPosition, "RememberedTarget"))
         {
             if (TryHandleDoorForDestination(currentMemoryTarget.lastKnownPosition))
                 return;
@@ -1415,6 +1474,7 @@ public class SimpleNPCBrain : MonoBehaviour
 
         if (!agent.pathPending && agent.remainingDistance <= rememberedTargetStopDistance)
         {
+            ClearMovementGoal();
             if (currentTarget != null && currentTarget.CanInteract(gameObject) && CanSeeInteractable(currentTarget))
             {
                 Narrate("There it is.", "move-remembered-found-target");
@@ -1433,6 +1493,7 @@ public class SimpleNPCBrain : MonoBehaviour
     private void InteractWithCurrentTarget()
     {
         ResetStallTimer();
+        Interactable interactedTarget = currentTarget;
 
         if (currentNeedActionIsUrgentDriven && !HasUrgentNeed())
         {
@@ -1539,6 +1600,9 @@ public class SimpleNPCBrain : MonoBehaviour
         currentComfortZoneTarget = null;
         hasExplorePoint = false;
         hasIdlePoint = false;
+
+        if (IsCurrentTargetMatchingLockedDoorMissionKey(interactedTarget) && TryResumeLockedDoorMission())
+            return;
 
         if (currentNeedActionIsUrgentDriven && IsNeedCurrentlySatisfied(currentNeedType))
         {
@@ -2083,6 +2147,7 @@ private void HandleRestingState()
         AIState previousState = currentState;
         currentState = newState;
         ResetStallTimer();
+        ClearMovementGoal();
 
         switch (currentState)
         {
@@ -3180,33 +3245,202 @@ private void HandleRestingState()
         return bestRoom != null;
     }
 
-    private bool IsStalled()
+    private void BeginMovementGoal(Vector3 target)
     {
+        if (!hasActiveMovementGoal || Vector3.Distance(activeMovementGoalPosition, target) > 0.3f)
+        {
+            activeMovementGoalPosition = target;
+            hasActiveMovementGoal = true;
+            movementGoalStartTime = Time.time;
+            movementGoalBestDistance = Vector3.Distance(transform.position, target);
+            movementLastProgressTime = Time.time;
+            movementGoalRecoveryAttempts = 0;
+            movementPathFailureCount = 0;
+            stallTimer = 0f;
+            DebugMovement($"Begin goal @ {target}");
+        }
+    }
+
+    private void MarkMovementProgress(string reason)
+    {
+        movementLastProgressTime = Time.time;
+        movementPathFailureCount = 0;
+        stallTimer = 0f;
+        DebugMovement($"Progress: {reason}");
+    }
+
+    private void UpdateMovementProgress(Vector3 target)
+    {
+        if (!hasActiveMovementGoal)
+            BeginMovementGoal(target);
+
+        float currentDistance = Vector3.Distance(transform.position, target);
+        if (currentDistance + movementProgressDistanceThreshold < movementGoalBestDistance)
+        {
+            movementGoalBestDistance = currentDistance;
+            MarkMovementProgress("distance");
+        }
+
+        if (!agent.pathPending && agent.hasPath)
+        {
+            if (agent.remainingDistance + movementProgressPathDistanceThreshold < movementGoalBestDistance)
+            {
+                movementGoalBestDistance = agent.remainingDistance;
+                MarkMovementProgress("path-distance");
+            }
+
+            if (agent.pathStatus != NavMeshPathStatus.PathComplete)
+            {
+                movementPathFailureCount++;
+                DebugMovement($"Path degraded ({agent.pathStatus}) failure count {movementPathFailureCount}");
+            }
+        }
+
         if (agent == null || !agent.isOnNavMesh || agent.pathPending || !agent.hasPath)
         {
             stallTimer = 0f;
-            return false;
+            return;
         }
 
         if (agent.remainingDistance <= agent.stoppingDistance + 0.05f)
         {
             stallTimer = 0f;
-            return false;
+            return;
         }
 
         if (agent.velocity.sqrMagnitude < stallVelocityThreshold * stallVelocityThreshold)
-        {
             stallTimer += Time.deltaTime;
-            return stallTimer >= stallTimeThreshold;
+        else
+            stallTimer = 0f;
+    }
+
+    private bool HasMovementGoalTimedOut()
+    {
+        if (!hasActiveMovementGoal)
+            return false;
+
+        if (stallTimer >= stallTimeThreshold)
+        {
+            DebugMovement($"Stall timeout ({stallTimer:F2}s >= {stallTimeThreshold:F2}s)");
+            return true;
         }
 
-        stallTimer = 0f;
+        if (Time.time - movementLastProgressTime >= movementNoProgressTimeout)
+        {
+            DebugMovement($"No-progress timeout ({Time.time - movementLastProgressTime:F2}s >= {movementNoProgressTimeout:F2}s)");
+            return true;
+        }
+
+        if (Time.time - movementGoalStartTime >= movementGoalTimeout)
+        {
+            DebugMovement($"Goal timeout ({Time.time - movementGoalStartTime:F2}s >= {movementGoalTimeout:F2}s)");
+            return true;
+        }
+
         return false;
+    }
+
+    private bool TryRecoverMovementGoal(Vector3 target, string contextTag)
+    {
+        UpdateMovementProgress(target);
+
+        bool timedOut = HasMovementGoalTimedOut();
+        bool pathFailed = movementPathFailureCount >= Mathf.Max(1, movementPathFailureLimit);
+        bool attemptsExceeded = movementGoalRecoveryAttempts >= Mathf.Max(1, maxMovementRecoveryAttempts);
+        if (!timedOut && !pathFailed && !attemptsExceeded)
+            return false;
+
+        if (attemptsExceeded)
+        {
+            DebugMovement($"[{contextTag}] Abandoning goal after too many recoveries.");
+            ClearMovementGoal();
+            return true;
+        }
+
+        movementGoalRecoveryAttempts++;
+        stallTimer = 0f;
+        DebugMovement($"[{contextTag}] Recovery attempt {movementGoalRecoveryAttempts}");
+
+        if (movementGoalRecoveryAttempts == 1)
+        {
+            agent.ResetPath();
+            agent.SetDestination(target);
+            MarkMovementProgress("soft-repath");
+            return false;
+        }
+
+        if (movementGoalRecoveryAttempts == 2 && TryFindNearbyRecoveryPoint(target, movementRecoverySampleRadius, out Vector3 angledPoint))
+        {
+            agent.ResetPath();
+            agent.SetDestination(angledPoint);
+            MarkMovementProgress("offset-approach");
+            return false;
+        }
+
+        if (movementGoalRecoveryAttempts == 3 && TryFindNearbyRecoveryPoint(transform.position, movementRecoveryUnstuckRadius, out Vector3 unstuckPoint))
+        {
+            agent.ResetPath();
+            agent.SetDestination(unstuckPoint);
+            MarkMovementProgress("local-unstuck");
+            return false;
+        }
+
+        DebugMovement($"[{contextTag}] Recovery exhausted, abandoning local route point.");
+        ClearMovementGoal();
+        return true;
+    }
+
+    private bool TryFindNearbyRecoveryPoint(Vector3 center, float radius, out Vector3 point)
+    {
+        for (int i = 0; i < 8; i++)
+        {
+            Vector2 circle = Random.insideUnitCircle * radius;
+            Vector3 candidate = center + new Vector3(circle.x, 0f, circle.y);
+            if (!NavMesh.SamplePosition(candidate, out NavMeshHit hit, 1.5f, NavMesh.AllAreas))
+                continue;
+
+            if (!HasPointClearance(hit.position))
+                continue;
+
+            if (!IsPathReachable(hit.position))
+                continue;
+
+            point = hit.position;
+            return true;
+        }
+
+        point = center;
+        return false;
+    }
+
+    private bool HasPointClearance(Vector3 point)
+    {
+        if (movementPointClearanceRadius <= 0.01f)
+            return true;
+
+        Collider[] hits = Physics.OverlapSphere(point + Vector3.up * 0.2f, movementPointClearanceRadius, obstacleLayer, QueryTriggerInteraction.Ignore);
+        return hits == null || hits.Length == 0;
     }
 
     private void ResetStallTimer()
     {
         stallTimer = 0f;
+    }
+
+    private void ClearMovementGoal()
+    {
+        hasActiveMovementGoal = false;
+        movementGoalRecoveryAttempts = 0;
+        movementPathFailureCount = 0;
+        stallTimer = 0f;
+    }
+
+    private void DebugMovement(string message)
+    {
+        if (!debugMovementRecovery)
+            return;
+
+        Debug.Log($"[SimpleNPCBrain:{name}] {message}");
     }
 
     private bool TryGetBlockingDoorTowards(Vector3 destination, out DoorInteractable door)
@@ -3235,6 +3469,7 @@ private void HandleRestingState()
 
         if (controller.IsLocked && !HasMatchingInventoryKey(controller))
         {
+            StartLockedDoorMission(door, controller.RequiredKeyId, destination);
             RememberLockedDoor(door);
             if (TryAcquireMatchingKeyForLockedDoor(controller.RequiredKeyId))
                 return true;
@@ -3243,6 +3478,9 @@ private void HandleRestingState()
 
         if (controller.IsOpen)
         {
+            if (hasLockedDoorMission && currentLockedDoorMission.blockedDoor == door)
+                ClearLockedDoorMission("blocked door already open");
+
             pendingDoorTarget = null;
             hasPendingDoorDestination = false;
             agent.ResetPath();
@@ -3255,6 +3493,7 @@ private void HandleRestingState()
         pendingDoorDestination = destination;
         hasPendingDoorDestination = true;
         agent.ResetPath();
+        MarkMovementProgress("door-handling-queued");
         ResetStallTimer();
         return true;
     }
@@ -3274,6 +3513,9 @@ private void HandleRestingState()
 
     if (controller.IsOpen)
     {
+        if (hasLockedDoorMission && currentLockedDoorMission.blockedDoor == pendingDoorTarget)
+            ClearLockedDoorMission("blocked door opened while pending");
+
         pendingDoorTarget = null;
         Vector3 repathDestination = hasPendingDoorDestination ? pendingDoorDestination : transform.position;
         hasPendingDoorDestination = false;
@@ -3308,6 +3550,7 @@ private void HandleRestingState()
             if (unlockAttempt == DoorUnlockAttempt.Failed)
             {
                 RememberLockedDoor(pendingDoorTarget);
+                StartLockedDoorMission(pendingDoorTarget, controller.RequiredKeyId, hasPendingDoorDestination ? pendingDoorDestination : transform.position);
 
                 if (TryAcquireMatchingKeyForLockedDoor(controller.RequiredKeyId))
                     return true;
@@ -3336,6 +3579,7 @@ private void HandleRestingState()
         pendingDoorDestination = destination;
         hasPendingDoorDestination = true;
         agent.ResetPath();
+        MarkMovementProgress("door-handling-queued");
         ResetStallTimer();
     }
 
@@ -3351,6 +3595,158 @@ private void HandleRestingState()
             return false;
 
         return npcInventory.TryGetMatchingKey(controller.RequiredKeyId, out _);
+    }
+
+    private void StartLockedDoorMission(DoorInteractable door, string requiredKeyId, Vector3 originalDestination)
+    {
+        if (door == null || string.IsNullOrWhiteSpace(requiredKeyId))
+            return;
+
+        currentLockedDoorMission = new LockedDoorMission
+        {
+            blockedDoor = door,
+            requiredKeyId = requiredKeyId,
+            originalDestination = originalDestination,
+            originatingNeedType = currentNeedType,
+            originatedFromUrgentNeed = currentNeedActionIsUrgentDriven,
+            isActive = true
+        };
+        hasLockedDoorMission = true;
+        DebugMovement($"Locked-door mission started: door={door.name}, key={requiredKeyId}, destination={originalDestination}");
+    }
+
+    private void ClearLockedDoorMission(string reason)
+    {
+        if (hasLockedDoorMission)
+            DebugMovement($"Locked-door mission cleared: {reason}");
+
+        hasLockedDoorMission = false;
+        currentLockedDoorMission = default;
+    }
+
+    private bool HasUsableLockedDoorMission()
+    {
+        if (!hasLockedDoorMission || !currentLockedDoorMission.isActive)
+            return false;
+
+        if (currentLockedDoorMission.blockedDoor == null || string.IsNullOrWhiteSpace(currentLockedDoorMission.requiredKeyId))
+        {
+            ClearLockedDoorMission("door or required key missing");
+            return false;
+        }
+
+        if (!currentLockedDoorMission.blockedDoor.isEnabled || !currentLockedDoorMission.blockedDoor.CanInteract(gameObject))
+        {
+            ClearLockedDoorMission("blocked door no longer interactable");
+            return false;
+        }
+
+        DoorController controller = currentLockedDoorMission.blockedDoor.GetDoorController();
+        if (controller == null)
+        {
+            ClearLockedDoorMission("door controller missing");
+            return false;
+        }
+
+        return true;
+    }
+
+    private bool IsCurrentTargetMatchingLockedDoorMissionKey(Interactable target)
+    {
+        if (!hasLockedDoorMission || target == null)
+            return false;
+
+        if (!target.isEnabled || !target.CanInteract(gameObject))
+            return false;
+
+        IKeyItem keyItem = target as IKeyItem;
+        if (keyItem == null)
+            return false;
+
+        return keyItem.GetKeyId() == currentLockedDoorMission.requiredKeyId;
+    }
+
+    private bool IsInventoryReadyForLockedDoorMission(out DoorController controller)
+    {
+        controller = null;
+
+        if (!HasUsableLockedDoorMission())
+            return false;
+
+        controller = currentLockedDoorMission.blockedDoor.GetDoorController();
+        if (controller == null)
+            return false;
+
+        if (!controller.IsLocked)
+            return true;
+
+        return HasMatchingInventoryKey(controller);
+    }
+
+    private bool TryResumeLockedDoorMission()
+    {
+        if (!HasUsableLockedDoorMission())
+            return false;
+
+        if (currentNeedActionIsUrgentDriven != currentLockedDoorMission.originatedFromUrgentNeed)
+            currentNeedActionIsUrgentDriven = currentLockedDoorMission.originatedFromUrgentNeed;
+        currentNeedType = currentLockedDoorMission.originatingNeedType;
+
+        DoorController controller = currentLockedDoorMission.blockedDoor.GetDoorController();
+        if (controller == null)
+        {
+            ClearLockedDoorMission("resume failed: door/controller invalid");
+            return false;
+        }
+
+        if (controller.IsOpen || !controller.IsLocked)
+        {
+            Vector3 destination = currentLockedDoorMission.originalDestination;
+            ClearLockedDoorMission("mission completed (door open)");
+
+            if (IsPathReachable(destination) || TryHandleDoorForDestination(destination))
+            {
+                BeginMovementGoal(destination);
+                agent.SetDestination(destination);
+                DebugMovement($"Locked-door mission completed. Resuming destination {destination}");
+                return true;
+            }
+
+            RestartNeedSearch();
+            return false;
+        }
+
+        if (!IsInventoryReadyForLockedDoorMission(out _))
+        {
+            if (IsCurrentTargetMatchingLockedDoorMissionKey(currentTarget))
+                return true;
+
+            bool foundKey = TryAcquireMatchingKeyForLockedDoor(currentLockedDoorMission.requiredKeyId);
+            if (!foundKey)
+            {
+                DebugMovement("Locked-door mission key search failed this tick; keeping mission active.");
+                if (currentTarget == null)
+                {
+                    ClearLockedDoorMission("no reachable matching key found");
+                    RestartNeedSearch();
+                }
+            }
+            else
+                DebugMovement("Locked-door mission key targeted.");
+
+            return foundKey;
+        }
+
+        pendingDoorTarget = currentLockedDoorMission.blockedDoor;
+        pendingDoorDestination = currentLockedDoorMission.originalDestination;
+        hasPendingDoorDestination = true;
+        hasExplorePoint = false;
+        hasIdlePoint = false;
+        if (currentState == AIState.IdleWander)
+            ChangeState(AIState.Explore);
+
+        DebugMovement($"Locked-door mission resuming to blocked door {pendingDoorTarget.name}");
+        return true;
     }
 
     private bool TryAcquireMatchingKeyForLockedDoor(string requiredKeyId)
@@ -3393,7 +3789,15 @@ private void HandleRestingState()
         currentComfortZoneTarget = null;
         hasExplorePoint = false;
         hasIdlePoint = false;
-        currentNeedActionIsUrgentDriven = false;
+        if (hasLockedDoorMission)
+        {
+            currentNeedType = currentLockedDoorMission.originatingNeedType;
+            currentNeedActionIsUrgentDriven = currentLockedDoorMission.originatedFromUrgentNeed;
+        }
+        else
+        {
+            currentNeedActionIsUrgentDriven = false;
+        }
 
         agent.ResetPath();
 
@@ -3406,11 +3810,15 @@ private void HandleRestingState()
             if (isVisibleKey)
             {
                 Narrate("I can see the key I need. Going to get it.", "key-retrieval-visible");
+                if (hasLockedDoorMission)
+                    DebugMovement("Locked-door mission key targeted from visible key.");
                 ChangeState(AIState.MoveToTarget);
             }
             else
             {
                 Narrate("I remember seeing a key that could open that door.", "key-retrieval-remembered");
+                if (hasLockedDoorMission)
+                    DebugMovement("Locked-door mission key targeted from memory.");
                 ChangeState(AIState.MoveToRememberedTarget);
             }
 
@@ -3428,21 +3836,29 @@ private void HandleRestingState()
         {
             case AIState.Explore:
                 if (hasExplorePoint)
+                {
+                    BeginMovementGoal(currentExplorePoint);
                     agent.SetDestination(currentExplorePoint);
+                }
                 break;
 
             case AIState.MoveToTarget:
                 if (currentTarget != null)
+                {
+                    BeginMovementGoal(currentTarget.GetInteractionPoint());
                     agent.SetDestination(currentTarget.GetInteractionPoint());
+                }
                 break;
 
             case AIState.MoveToRememberedTarget:
                 if (currentComfortZoneTarget != null)
                 {
+                    BeginMovementGoal(currentComfortZoneTarget.lastKnownPosition);
                     agent.SetDestination(currentComfortZoneTarget.lastKnownPosition);
                 }
                 else if (currentMemoryTarget != null)
                 {
+                    BeginMovementGoal(currentMemoryTarget.lastKnownPosition);
                     agent.SetDestination(currentMemoryTarget.lastKnownPosition);
                 }
                 break;
