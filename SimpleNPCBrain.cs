@@ -18,6 +18,16 @@ public class SimpleNPCBrain : MonoBehaviour
         Unlocked
     }
 
+    private struct LockedDoorMission
+    {
+        public DoorInteractable blockedDoor;
+        public string requiredKeyId;
+        public Vector3 originalDestination;
+        public NeedType originatingNeedType;
+        public bool originatedFromUrgentNeed;
+        public bool isActive;
+    }
+
     public enum AIState
     {
         IdleWander,
@@ -190,6 +200,16 @@ public class SimpleNPCBrain : MonoBehaviour
     private Vector3 currentActivityLookPoint;
     private bool hasCurrentActivityLookPoint = false;
     private float currentActivityLookTimer = 0f;
+    private LockedDoorMission currentLockedDoorMission;
+    private bool hasLockedDoorMission = false;
+
+    private Vector3 activeMovementGoalPosition;
+    private bool hasActiveMovementGoal = false;
+    private float movementGoalStartTime = 0f;
+    private float movementGoalBestDistance = Mathf.Infinity;
+    private float movementLastProgressTime = 0f;
+    private int movementGoalRecoveryAttempts = 0;
+    private int movementPathFailureCount = 0;
 
     private Vector3 activeMovementGoalPosition;
     private bool hasActiveMovementGoal = false;
@@ -271,6 +291,13 @@ public class SimpleNPCBrain : MonoBehaviour
     PassiveObserveVisibleInteractables();
     PassiveObserveVisibleComfortZones();
 
+    if (currentState != AIState.Resting &&
+        currentState != AIState.PerformingActivity &&
+        TryResumeLockedDoorMission())
+    {
+        return;
+    }
+
     if (needsManager.HasUrgentNeed(out NeedType mostUrgentNeed))
     {
         bool needChanged = mostUrgentNeed != currentNeedType;
@@ -310,7 +337,7 @@ public class SimpleNPCBrain : MonoBehaviour
             ChangeState(AIState.Explore);
         }
     }
-    else if (currentNeedActionIsUrgentDriven && IsGoalExecutionState(currentState) && currentState != AIState.Resting)
+    else if (currentNeedActionIsUrgentDriven && IsGoalExecutionState(currentState) && currentState != AIState.Resting && !hasLockedDoorMission)
     {
         Narrate("I feel okay again. Back to wandering.", "return-to-idle-no-urgent");
         AbortCurrentNeedAction();
@@ -1474,6 +1501,7 @@ public class SimpleNPCBrain : MonoBehaviour
     private void InteractWithCurrentTarget()
     {
         ResetStallTimer();
+        Interactable interactedTarget = currentTarget;
 
         if (currentNeedActionIsUrgentDriven && !HasUrgentNeed())
         {
@@ -1580,6 +1608,9 @@ public class SimpleNPCBrain : MonoBehaviour
         currentComfortZoneTarget = null;
         hasExplorePoint = false;
         hasIdlePoint = false;
+
+        if (IsCurrentTargetMatchingLockedDoorMissionKey(interactedTarget) && TryResumeLockedDoorMission())
+            return;
 
         if (currentNeedActionIsUrgentDriven && IsNeedCurrentlySatisfied(currentNeedType))
         {
@@ -3446,6 +3477,7 @@ private void HandleRestingState()
 
         if (controller.IsLocked && !HasMatchingInventoryKey(controller))
         {
+            StartLockedDoorMission(door, controller.RequiredKeyId, destination);
             RememberLockedDoor(door);
             if (TryAcquireMatchingKeyForLockedDoor(controller.RequiredKeyId))
                 return true;
@@ -3454,6 +3486,9 @@ private void HandleRestingState()
 
         if (controller.IsOpen)
         {
+            if (hasLockedDoorMission && currentLockedDoorMission.blockedDoor == door)
+                ClearLockedDoorMission("blocked door already open");
+
             pendingDoorTarget = null;
             hasPendingDoorDestination = false;
             agent.ResetPath();
@@ -3486,6 +3521,9 @@ private void HandleRestingState()
 
     if (controller.IsOpen)
     {
+        if (hasLockedDoorMission && currentLockedDoorMission.blockedDoor == pendingDoorTarget)
+            ClearLockedDoorMission("blocked door opened while pending");
+
         pendingDoorTarget = null;
         Vector3 repathDestination = hasPendingDoorDestination ? pendingDoorDestination : transform.position;
         hasPendingDoorDestination = false;
@@ -3520,6 +3558,7 @@ private void HandleRestingState()
             if (unlockAttempt == DoorUnlockAttempt.Failed)
             {
                 RememberLockedDoor(pendingDoorTarget);
+                StartLockedDoorMission(pendingDoorTarget, controller.RequiredKeyId, hasPendingDoorDestination ? pendingDoorDestination : transform.position);
 
                 if (TryAcquireMatchingKeyForLockedDoor(controller.RequiredKeyId))
                     return true;
@@ -3566,6 +3605,158 @@ private void HandleRestingState()
         return npcInventory.TryGetMatchingKey(controller.RequiredKeyId, out _);
     }
 
+    private void StartLockedDoorMission(DoorInteractable door, string requiredKeyId, Vector3 originalDestination)
+    {
+        if (door == null || string.IsNullOrWhiteSpace(requiredKeyId))
+            return;
+
+        currentLockedDoorMission = new LockedDoorMission
+        {
+            blockedDoor = door,
+            requiredKeyId = requiredKeyId,
+            originalDestination = originalDestination,
+            originatingNeedType = currentNeedType,
+            originatedFromUrgentNeed = currentNeedActionIsUrgentDriven,
+            isActive = true
+        };
+        hasLockedDoorMission = true;
+        DebugMovement($"Locked-door mission started: door={door.name}, key={requiredKeyId}, destination={originalDestination}");
+    }
+
+    private void ClearLockedDoorMission(string reason)
+    {
+        if (hasLockedDoorMission)
+            DebugMovement($"Locked-door mission cleared: {reason}");
+
+        hasLockedDoorMission = false;
+        currentLockedDoorMission = default;
+    }
+
+    private bool HasUsableLockedDoorMission()
+    {
+        if (!hasLockedDoorMission || !currentLockedDoorMission.isActive)
+            return false;
+
+        if (currentLockedDoorMission.blockedDoor == null || string.IsNullOrWhiteSpace(currentLockedDoorMission.requiredKeyId))
+        {
+            ClearLockedDoorMission("door or required key missing");
+            return false;
+        }
+
+        if (!currentLockedDoorMission.blockedDoor.isEnabled || !currentLockedDoorMission.blockedDoor.CanInteract(gameObject))
+        {
+            ClearLockedDoorMission("blocked door no longer interactable");
+            return false;
+        }
+
+        DoorController controller = currentLockedDoorMission.blockedDoor.GetDoorController();
+        if (controller == null)
+        {
+            ClearLockedDoorMission("door controller missing");
+            return false;
+        }
+
+        return true;
+    }
+
+    private bool IsCurrentTargetMatchingLockedDoorMissionKey(Interactable target)
+    {
+        if (!hasLockedDoorMission || target == null)
+            return false;
+
+        if (!target.isEnabled || !target.CanInteract(gameObject))
+            return false;
+
+        IKeyItem keyItem = target as IKeyItem;
+        if (keyItem == null)
+            return false;
+
+        return keyItem.GetKeyId() == currentLockedDoorMission.requiredKeyId;
+    }
+
+    private bool IsInventoryReadyForLockedDoorMission(out DoorController controller)
+    {
+        controller = null;
+
+        if (!HasUsableLockedDoorMission())
+            return false;
+
+        controller = currentLockedDoorMission.blockedDoor.GetDoorController();
+        if (controller == null)
+            return false;
+
+        if (!controller.IsLocked)
+            return true;
+
+        return HasMatchingInventoryKey(controller);
+    }
+
+    private bool TryResumeLockedDoorMission()
+    {
+        if (!HasUsableLockedDoorMission())
+            return false;
+
+        if (currentNeedActionIsUrgentDriven != currentLockedDoorMission.originatedFromUrgentNeed)
+            currentNeedActionIsUrgentDriven = currentLockedDoorMission.originatedFromUrgentNeed;
+        currentNeedType = currentLockedDoorMission.originatingNeedType;
+
+        DoorController controller = currentLockedDoorMission.blockedDoor.GetDoorController();
+        if (controller == null)
+        {
+            ClearLockedDoorMission("resume failed: door/controller invalid");
+            return false;
+        }
+
+        if (controller.IsOpen || !controller.IsLocked)
+        {
+            Vector3 destination = currentLockedDoorMission.originalDestination;
+            ClearLockedDoorMission("mission completed (door open)");
+
+            if (IsPathReachable(destination) || TryHandleDoorForDestination(destination))
+            {
+                BeginMovementGoal(destination);
+                agent.SetDestination(destination);
+                DebugMovement($"Locked-door mission completed. Resuming destination {destination}");
+                return true;
+            }
+
+            RestartNeedSearch();
+            return false;
+        }
+
+        if (!IsInventoryReadyForLockedDoorMission(out _))
+        {
+            if (IsCurrentTargetMatchingLockedDoorMissionKey(currentTarget))
+                return true;
+
+            bool foundKey = TryAcquireMatchingKeyForLockedDoor(currentLockedDoorMission.requiredKeyId);
+            if (!foundKey)
+            {
+                DebugMovement("Locked-door mission key search failed this tick; keeping mission active.");
+                if (currentTarget == null)
+                {
+                    ClearLockedDoorMission("no reachable matching key found");
+                    RestartNeedSearch();
+                }
+            }
+            else
+                DebugMovement("Locked-door mission key targeted.");
+
+            return foundKey;
+        }
+
+        pendingDoorTarget = currentLockedDoorMission.blockedDoor;
+        pendingDoorDestination = currentLockedDoorMission.originalDestination;
+        hasPendingDoorDestination = true;
+        hasExplorePoint = false;
+        hasIdlePoint = false;
+        if (currentState == AIState.IdleWander)
+            ChangeState(AIState.Explore);
+
+        DebugMovement($"Locked-door mission resuming to blocked door {pendingDoorTarget.name}");
+        return true;
+    }
+
     private bool TryAcquireMatchingKeyForLockedDoor(string requiredKeyId)
     {
         if (string.IsNullOrWhiteSpace(requiredKeyId))
@@ -3606,7 +3797,15 @@ private void HandleRestingState()
         currentComfortZoneTarget = null;
         hasExplorePoint = false;
         hasIdlePoint = false;
-        currentNeedActionIsUrgentDriven = false;
+        if (hasLockedDoorMission)
+        {
+            currentNeedType = currentLockedDoorMission.originatingNeedType;
+            currentNeedActionIsUrgentDriven = currentLockedDoorMission.originatedFromUrgentNeed;
+        }
+        else
+        {
+            currentNeedActionIsUrgentDriven = false;
+        }
 
         agent.ResetPath();
 
@@ -3619,11 +3818,15 @@ private void HandleRestingState()
             if (isVisibleKey)
             {
                 Narrate("I can see the key I need. Going to get it.", "key-retrieval-visible");
+                if (hasLockedDoorMission)
+                    DebugMovement("Locked-door mission key targeted from visible key.");
                 ChangeState(AIState.MoveToTarget);
             }
             else
             {
                 Narrate("I remember seeing a key that could open that door.", "key-retrieval-remembered");
+                if (hasLockedDoorMission)
+                    DebugMovement("Locked-door mission key targeted from memory.");
                 ChangeState(AIState.MoveToRememberedTarget);
             }
 
