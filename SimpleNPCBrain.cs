@@ -289,6 +289,13 @@ public class SimpleNPCBrain : MonoBehaviour
     PassiveObserveVisibleInteractables();
     PassiveObserveVisibleComfortZones();
 
+    if (currentState != AIState.Resting &&
+        currentState != AIState.PerformingActivity &&
+        TryResumeLockedDoorMission())
+    {
+        return;
+    }
+
     if (needsManager.HasUrgentNeed(out NeedType mostUrgentNeed))
     {
         bool needChanged = mostUrgentNeed != currentNeedType;
