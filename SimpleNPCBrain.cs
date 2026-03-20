@@ -177,6 +177,9 @@ public class SimpleNPCBrain : MonoBehaviour
     private IActivityInteractable currentActivityInteractable;
     private float currentActivityElapsed = 0f;
     private float currentActivityDuration = 0f;
+    private Vector3 currentActivityLookPoint;
+    private bool hasCurrentActivityLookPoint = false;
+    private float currentActivityLookTimer = 0f;
 
     private readonly Dictionary<NeedType, NeedsManager.NeedUrgencyBand> lastNeedBands = new Dictionary<NeedType, NeedsManager.NeedUrgencyBand>();
     private readonly Dictionary<NeedType, bool> lastNeedUrgentFlags = new Dictionary<NeedType, bool>();
@@ -1458,6 +1461,8 @@ public class SimpleNPCBrain : MonoBehaviour
                     float minDuration = activityTarget.GetMinimumUseDuration();
                     float maxDuration = activityTarget.GetMaximumUseDuration();
                     currentActivityDuration = Random.Range(minDuration, Mathf.Max(minDuration, maxDuration));
+                    hasCurrentActivityLookPoint = false;
+                    currentActivityLookTimer = 0f;
 
                     Vector3 activityAnchor = activityTarget.GetActivityAnchorPoint();
                     float anchorDistance = Vector3.Distance(transform.position, activityAnchor);
@@ -1733,6 +1738,8 @@ private void HandleRestingState()
             agent.Warp(anchorPosition);
         }
 
+        UpdateObservationZoneLookBehavior();
+
         currentActivityElapsed += Time.deltaTime;
         if (currentActivityElapsed < currentActivityDuration)
             return;
@@ -1740,6 +1747,39 @@ private void HandleRestingState()
         Narrate("That was enough downtime. Back to wandering.", "activity-complete");
         FinishActivitySession(true);
         ChangeState(AIState.IdleWander);
+    }
+
+    private void UpdateObservationZoneLookBehavior()
+    {
+        ObservationZoneInteractable observationZone = currentActivityInteractable as ObservationZoneInteractable;
+        if (observationZone == null)
+            return;
+
+        if (!observationZone.IsInsideZone(transform.position))
+        {
+            Vector3 anchor = observationZone.GetActivityAnchorPoint();
+            if (Vector3.Distance(transform.position, anchor) > 0.15f)
+                agent.Warp(anchor);
+        }
+
+        currentActivityLookTimer -= Time.deltaTime;
+        if (currentActivityLookTimer > 0f && hasCurrentActivityLookPoint)
+        {
+            FaceTowardsPoint(currentActivityLookPoint);
+            return;
+        }
+
+        if (observationZone.TryGetNextLookPoint(out Vector3 nextLookPoint))
+        {
+            currentActivityLookPoint = nextLookPoint;
+            hasCurrentActivityLookPoint = true;
+            currentActivityLookTimer = observationZone.GetNextLookDwellDuration();
+            FaceTowardsPoint(currentActivityLookPoint);
+            return;
+        }
+
+        hasCurrentActivityLookPoint = false;
+        currentActivityLookTimer = 0f;
     }
 
     private InventoryUseAttempt TryUseInventoryItemForNeed(NeedType needType)
@@ -1973,6 +2013,8 @@ private void HandleRestingState()
         currentActivityInteractable = null;
         currentActivityElapsed = 0f;
         currentActivityDuration = 0f;
+        hasCurrentActivityLookPoint = false;
+        currentActivityLookTimer = 0f;
 
         if (!clearTarget)
             return;
@@ -3407,6 +3449,18 @@ private void HandleRestingState()
         }
     }
 
+    private void FaceTowardsPoint(Vector3 point)
+    {
+        Vector3 flatDirection = point - transform.position;
+        flatDirection.y = 0f;
+
+        if (flatDirection.sqrMagnitude < 0.0001f)
+            return;
+
+        Quaternion targetRotation = Quaternion.LookRotation(flatDirection.normalized);
+        transform.rotation = Quaternion.Slerp(transform.rotation, targetRotation, Time.deltaTime * 6f);
+    }
+
     private void ClearActiveTargets()
     {
         if (currentActivityInteractable != null)
@@ -3415,6 +3469,8 @@ private void HandleRestingState()
         currentActivityInteractable = null;
         currentActivityElapsed = 0f;
         currentActivityDuration = 0f;
+        hasCurrentActivityLookPoint = false;
+        currentActivityLookTimer = 0f;
         currentTarget = null;
         currentMemoryTarget = null;
         currentComfortZoneTarget = null;
