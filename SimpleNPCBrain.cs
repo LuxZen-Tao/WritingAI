@@ -1093,42 +1093,19 @@ private void Update()
         for (int i = 0; i < visibleInteractables.Count; i++)
         {
             Interactable interactable = visibleInteractables[i];
-
-            // --- KEYS (important: must come BEFORE need satisfiers) ---
-            if (interactable is IKeyItem && interactable is IPickupable pickupable && pickupable.CanPickUp(gameObject))
-            {
-                RememberObservedKey(interactable);
-                continue;
-            }
-
-            // --- NORMAL NEED ITEMS ---
-            if (interactable is INeedSatisfier satisfier)
-            {
-                RememberInteractable(interactable, satisfier.GetNeedType());
-                continue;
-            }
-
-            if (interactable is IActivityInteractable activity)
-            {
-                RememberActivityInteractable(interactable, activity.GetActivityType());
-            }
+            RememberObservedInteractable(interactable);
         }
     }
 
-    private void RememberObservedKey(Interactable keyInteractable)
+    private void RememberObservedInteractable(Interactable interactable)
     {
-        if (keyInteractable == null)
+        if (interactable == null)
             return;
 
-        RememberInteractable(keyInteractable, NeedType.Key);
-    }
-
-    private void RememberActivityInteractable(Interactable activityInteractable, ActivityType activityType)
-    {
-        if (activityInteractable == null)
+        if (!memoryService.TryRememberObservedInteractable(memory, interactable, gameObject, Time.time, out NpcMemoryService.ObservedInteractableMemoryResult result))
             return;
 
-        RememberInteractable(activityInteractable, NeedType.Key, true, activityType);
+        NarrateInteractableMemoryWrite(interactable, result.writeResult);
     }
 
     private bool TryStartDowntimeActivity()
@@ -1184,7 +1161,7 @@ private void Update()
             return false;
 
         IActivityInteractable bestActivity = bestTarget as IActivityInteractable;
-        RememberActivityInteractable(bestTarget, bestActivity.GetActivityType());
+        RememberInteractable(bestTarget, NeedType.Key, true, bestActivity.GetActivityType());
         if (!BeginDowntimeTargetMove(bestTarget, null))
             return false;
 
@@ -1437,7 +1414,7 @@ private void Update()
             }
 
             Narrate("Nothing here... I need to try something else.", "move-remembered-not-found");
-            memory.Remove(currentMemoryTarget);
+            ForgetRememberedInteractable(currentMemoryTarget);
             currentMemoryTarget = null;
             currentTarget = null;
             HandleNeedActionFailure();
@@ -2130,6 +2107,14 @@ private void HandleRestingState()
     private void RememberInteractable(Interactable interactable, NeedType needType, bool isActivity = false, ActivityType activityType = ActivityType.Generic)
     {
         NpcMemoryService.MemoryWriteResult writeResult = memoryService.RememberInteractable(memory, interactable, needType, Time.time, isActivity, activityType);
+        NarrateInteractableMemoryWrite(interactable, writeResult);
+    }
+
+    private void NarrateInteractableMemoryWrite(Interactable interactable, NpcMemoryService.MemoryWriteResult writeResult)
+    {
+        if (interactable == null)
+            return;
+
         if (writeResult == NpcMemoryService.MemoryWriteResult.Updated)
             Narrate("I've seen this before.", "memory-update-interactable-" + interactable.GetInstanceID());
         else if (writeResult == NpcMemoryService.MemoryWriteResult.Added)
@@ -2158,9 +2143,14 @@ private void HandleRestingState()
 
     private void RememberLockedDoor(DoorInteractable door)
     {
-        bool wasAdded = memoryService.RememberLockedDoor(rememberedLockedDoors, door, Time.time);
-        if (wasAdded)
+        NpcMemoryService.LockedDoorMemoryWriteResult writeResult = memoryService.RememberLockedDoor(rememberedLockedDoors, door, Time.time);
+        if (writeResult == NpcMemoryService.LockedDoorMemoryWriteResult.Added)
             Narrate("I can't open that. I'll remember it.", "memory-locked-door-" + door.GetInstanceID());
+    }
+
+    private void ForgetRememberedInteractable(RememberedInteractable remembered)
+    {
+        memoryService.ForgetRememberedInteractable(memory, remembered);
     }
 
     private bool IsKeyUsefulForRememberedLockedDoor(IKeyItem keyItem)
@@ -4030,7 +4020,7 @@ private void HandleRestingState()
 
         if (TryFindBestVisibleMatchingKey(requiredKeyId, out Interactable visibleKey))
         {
-            RememberObservedKey(visibleKey);
+            RememberObservedInteractable(visibleKey);
             return CommitMatchingKeyTarget(visibleKey, null, true);
         }
 

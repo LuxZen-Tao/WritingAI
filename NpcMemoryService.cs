@@ -3,6 +3,10 @@ using UnityEngine;
 
 public class NpcMemoryService
 {
+    // Future memory categories should follow the same pattern used here:
+    // 1. add a lightweight remembered data record,
+    // 2. add focused write/cleanup/query helpers in this service,
+    // 3. return small typed results so the brain stays the coordinator for narration and goals.
     public enum MemoryWriteResult
     {
         None,
@@ -16,6 +20,71 @@ public class NpcMemoryService
         UpdatedNoLightingChange,
         UpdatedLightingChanged,
         Added
+    }
+
+    public enum LockedDoorMemoryWriteResult
+    {
+        None,
+        Updated,
+        Added
+    }
+
+    public enum ObservedInteractableKind
+    {
+        None,
+        KeyItem,
+        NeedSatisfier,
+        Activity
+    }
+
+    public struct ObservedInteractableMemoryResult
+    {
+        public ObservedInteractableKind kind;
+        public MemoryWriteResult writeResult;
+        public NeedType needType;
+        public bool isActivity;
+        public ActivityType activityType;
+    }
+
+    public bool TryRememberObservedInteractable(
+        List<RememberedInteractable> memory,
+        Interactable interactable,
+        GameObject actor,
+        float now,
+        out ObservedInteractableMemoryResult result)
+    {
+        result = default;
+
+        if (memory == null || interactable == null)
+            return false;
+
+        if (interactable is IKeyItem && interactable is IPickupable pickupable && pickupable.CanPickUp(actor))
+        {
+            result.kind = ObservedInteractableKind.KeyItem;
+            result.needType = NeedType.Key;
+            result.writeResult = RememberInteractable(memory, interactable, NeedType.Key, now);
+            return result.writeResult != MemoryWriteResult.None;
+        }
+
+        if (interactable is INeedSatisfier satisfier)
+        {
+            result.kind = ObservedInteractableKind.NeedSatisfier;
+            result.needType = satisfier.GetNeedType();
+            result.writeResult = RememberInteractable(memory, interactable, result.needType, now);
+            return result.writeResult != MemoryWriteResult.None;
+        }
+
+        if (interactable is IActivityInteractable activity)
+        {
+            result.kind = ObservedInteractableKind.Activity;
+            result.needType = NeedType.Key;
+            result.isActivity = true;
+            result.activityType = activity.GetActivityType();
+            result.writeResult = RememberInteractable(memory, interactable, NeedType.Key, now, true, result.activityType);
+            return result.writeResult != MemoryWriteResult.None;
+        }
+
+        return false;
     }
 
     public MemoryWriteResult RememberInteractable(
@@ -60,6 +129,14 @@ public class NpcMemoryService
             return;
 
         memory.RemoveAll(m => m == null || m.interactable == null || now - m.lastSeenTime > memoryDuration);
+    }
+
+    public bool ForgetRememberedInteractable(List<RememberedInteractable> memory, RememberedInteractable remembered)
+    {
+        if (memory == null || remembered == null)
+            return false;
+
+        return memory.Remove(remembered);
     }
 
     public ComfortMemoryWriteResult RememberComfortZone(List<RememberedComfortZone> rememberedComfortZones, RoomArea room, Vector3 position, bool wasLit, float now)
@@ -149,18 +226,18 @@ public class NpcMemoryService
         });
     }
 
-    public bool RememberLockedDoor(List<RememberedLockedDoor> rememberedLockedDoors, DoorInteractable door, float now)
+    public LockedDoorMemoryWriteResult RememberLockedDoor(List<RememberedLockedDoor> rememberedLockedDoors, DoorInteractable door, float now)
     {
         if (rememberedLockedDoors == null || door == null)
-            return false;
+            return LockedDoorMemoryWriteResult.None;
 
         DoorController controller = door.GetDoorController();
         if (controller == null || !controller.IsLocked)
-            return false;
+            return LockedDoorMemoryWriteResult.None;
 
         string requiredKeyId = controller.RequiredKeyId;
         if (string.IsNullOrWhiteSpace(requiredKeyId))
-            return false;
+            return LockedDoorMemoryWriteResult.None;
 
         for (int i = 0; i < rememberedLockedDoors.Count; i++)
         {
@@ -171,11 +248,11 @@ public class NpcMemoryService
             remembered.lastKnownPosition = door.GetInteractionPoint();
             remembered.requiredKeyId = requiredKeyId;
             remembered.lastSeenTime = now;
-            return false;
+            return LockedDoorMemoryWriteResult.Updated;
         }
 
         rememberedLockedDoors.Add(new RememberedLockedDoor(door, door.GetInteractionPoint(), requiredKeyId, now));
-        return true;
+        return LockedDoorMemoryWriteResult.Added;
     }
 
     public bool IsKeyUsefulForRememberedLockedDoor(List<RememberedLockedDoor> rememberedLockedDoors, IKeyItem keyItem)
