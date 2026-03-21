@@ -1398,6 +1398,12 @@ private void Update()
         if (TryAcquireVisibleTarget(currentNeedType))
             return;
 
+        if (routeCoordinator.SubgoalCount > 0)
+        {
+            string rememberedName = currentTarget != null ? currentTarget.name : currentMemoryTarget.interactable.name;
+            DebugMovement($"[RememberedTarget] Continuing movement toward remembered key target {rememberedName}; remaining={(agent.pathPending ? -1f : agent.remainingDistance):F2}");
+        }
+
         agent.speed = GetActionMoveSpeed();
         MovementRouteStepResult rememberedRouteStep = ExecuteMovementRouteStep(currentMemoryTarget.lastKnownPosition, rememberedTargetStopDistance, "RememberedTarget");
         if (rememberedRouteStep.redirectedToDoor)
@@ -3930,7 +3936,10 @@ private void HandleRestingState()
         if (!IsInventoryReadyForTopSubgoal(subgoal, out controller))
         {
             if (IsCurrentTargetMatchingTopSubgoalKey(currentTarget))
-                return true;
+            {
+                DebugMovement($"Subgoal already targeting key {subgoal.requiredKeyId}; allowing {currentState} to continue.");
+                return false;
+            }
 
             bool foundKey = TryAcquireMatchingKeyForLockedDoor(subgoal.requiredKeyId);
             if (foundKey)
@@ -3945,7 +3954,8 @@ private void HandleRestingState()
                 return TryResumeParentGoalAfterSubgoal();
             }
 
-            return true;
+            DebugMovement($"Subgoal observed active target {currentTarget.name} without changing plan; allowing {currentState} to continue.");
+            return false;
         }
 
         hasExplorePoint = false;
