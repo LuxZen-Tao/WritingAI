@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes"?>
+<doc>
+  <members>
+    <assembly>
+      <name>UnityEngine.IdentifiersModule</name>
+    </assembly>
+    <member name="T:UnityEngine.Identifiers.Identifiers">
+      <summary>
+        <para>Provides information about the current game and its Player session through unique identifiers.</para>
+      </summary>
+    </member>
+    <member name="P:UnityEngine.Identifiers.Identifiers.installationId">
+      <summary>
+        <para>Returns the installation ID for this Unity game.</para>
+      </summary>
+    </member>
+    <member name="A:UnityEngine.IdentifiersModule">
+      <summary>
+        <para>The Identifiers module implements the Engine API for Identifiers, which provides information about the current game and its player session.</para>
+      </summary>
+    </member>
+  </members>
+</doc>

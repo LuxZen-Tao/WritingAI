@@ -18,6 +18,24 @@ public class SimpleNPCBrain : MonoBehaviour
         Unlocked
     }
 
+    private enum PendingDoorPhase
+    {
+        None,
+        ApproachingAnchor,
+        Repositioning
+    }
+
+    private struct PendingDoorRuntime
+    {
+        public PendingDoorPhase phase;
+        public float startTime;
+        public float bestDistance;
+        public float lastProgressTime;
+        public bool repositionAttempted;
+        public bool hasRecoveryPoint;
+        public Vector3 recoveryPoint;
+    }
+
     public enum AIState
     {
         IdleWander,
@@ -79,6 +97,13 @@ public class SimpleNPCBrain : MonoBehaviour
     public float doorInteractCooldown = 0.5f;
     public float doorStopDistance = 1.15f;
     public int maxExploreDoorRouteAttempts = 2;
+
+    [Header("Pending Door Stabilization")]
+    public float pendingDoorProgressDistanceThreshold = 0.15f;
+    public float pendingDoorNoProgressTimeout = 1.5f;
+    public float pendingDoorMaxDuration = 6f;
+    public float pendingDoorRecoverySampleRadius = 0.9f;
+    public float pendingDoorRecoveryArrivalDistance = 0.35f;
 
     [Header("Opportunistic Needs")]
     public float opportunisticTargetMaxDistance = 2.5f;
@@ -176,6 +201,7 @@ public class SimpleNPCBrain : MonoBehaviour
     private DoorInteractable pendingDoorTarget;
     private Vector3 pendingDoorDestination;
     private bool hasPendingDoorDestination = false;
+    private PendingDoorRuntime pendingDoorRuntime;
     private int currentExploreDoorRouteAttempts = 0;
     private RestInteractable currentRestInteractable;
     private float currentRestSessionElapsed = 0f;
@@ -593,6 +619,9 @@ private void Update()
         BeginMovementGoal(currentExplorePoint);
         agent.SetDestination(currentExplorePoint);
         currentExploreDoorRouteAttempts = 0;
+
+        if (TryRedirectPartialPathToPendingDoor(currentExplorePoint, "ExplorePoint"))
+            return;
 
         if (TryRecoverMovementGoal(currentExplorePoint, "ExplorePoint"))
         {
@@ -1202,6 +1231,9 @@ private void Update()
         BeginMovementGoal(targetPosition);
         agent.SetDestination(targetPosition);
 
+        if (TryRedirectPartialPathToPendingDoor(targetPosition, "CurrentTarget"))
+            return;
+
         if (TryRecoverMovementGoal(targetPosition, "CurrentTarget"))
         {
             if (TryHandleDoorForDestination(targetPosition))
@@ -1262,6 +1294,9 @@ private void Update()
             BeginMovementGoal(currentComfortZoneTarget.lastKnownPosition);
             agent.SetDestination(currentComfortZoneTarget.lastKnownPosition);
 
+            if (TryRedirectPartialPathToPendingDoor(currentComfortZoneTarget.lastKnownPosition, "RememberedComfortZone"))
+                return;
+
             if (TryRecoverMovementGoal(currentComfortZoneTarget.lastKnownPosition, "RememberedComfortZone"))
             {
                 if (TryHandleDoorForDestination(currentComfortZoneTarget.lastKnownPosition))
@@ -1317,6 +1352,9 @@ private void Update()
         agent.speed = GetActionMoveSpeed();
         BeginMovementGoal(currentMemoryTarget.lastKnownPosition);
         agent.SetDestination(currentMemoryTarget.lastKnownPosition);
+
+        if (TryRedirectPartialPathToPendingDoor(currentMemoryTarget.lastKnownPosition, "RememberedTarget"))
+            return;
 
         if (TryRecoverMovementGoal(currentMemoryTarget.lastKnownPosition, "RememberedTarget"))
         {
@@ -1854,8 +1892,7 @@ private void HandleRestingState()
         if (pendingDoorTarget.GetDoorController() == null)
         {
             WarnInvariant("Invariant: pendingDoorTarget has no DoorController. Clearing pending door state.");
-            pendingDoorTarget = null;
-            hasPendingDoorDestination = false;
+            ResetPendingDoorState();
         }
     }
 
@@ -1895,8 +1932,7 @@ private void HandleRestingState()
         currentMemoryTarget = null;
         currentComfortZoneTarget = null;
         currentNeedActionIsUrgentDriven = false;
-        pendingDoorTarget = null;
-        hasPendingDoorDestination = false;
+        ResetPendingDoorState();
         currentExploreDoorRouteAttempts = 0;
         hasExplorePoint = false;
         hasIdlePoint = false;
@@ -1915,8 +1951,7 @@ private void HandleRestingState()
         currentMemoryTarget = null;
         currentComfortZoneTarget = null;
         currentNeedActionIsUrgentDriven = true;
-        pendingDoorTarget = null;
-        hasPendingDoorDestination = false;
+        ResetPendingDoorState();
         currentExploreDoorRouteAttempts = 0;
         hasExplorePoint = false;
         hasIdlePoint = false;
@@ -1999,8 +2034,7 @@ private void HandleRestingState()
     private void HandleNeedActionFailure()
     {
         ClearMovementGoal();
-        pendingDoorTarget = null;
-        hasPendingDoorDestination = false;
+        ResetPendingDoorState();
         currentExploreDoorRouteAttempts = 0;
 
         if (currentNeedActionIsUrgentDriven || HasUrgentNeed())
@@ -2201,11 +2235,11 @@ private void HandleRestingState()
             return DoorUnlockAttempt.Failed;
 
         Interactable keyInteractable = key as Interactable;
-        if (keyInteractable != null && !TryPrepareItemInHand(keyInteractable))
+        bool waitingForHandReady;
+        if (!TryPrepareKeyForDoorUse(keyInteractable, out waitingForHandReady))
         {
-            if (npcInventory.GetHandItem() == keyInteractable && !IsPreparedHandItemReady(keyInteractable))
+            if (waitingForHandReady)
                 return DoorUnlockAttempt.WaitingForHandReady;
-
             return DoorUnlockAttempt.Failed;
         }
 
@@ -2222,6 +2256,38 @@ private void HandleRestingState()
         }
 
         return DoorUnlockAttempt.Failed;
+    }
+
+    private bool TryPrepareKeyForDoorUse(Interactable keyInteractable, out bool waitingForHandReady)
+    {
+        waitingForHandReady = false;
+
+        if (keyInteractable == null || npcInventory == null)
+            return false;
+
+        if (npcInventory.GetHandItem() == keyInteractable)
+        {
+            if (!IsPreparedHandItemReady(keyInteractable))
+            {
+                if (activePreparedHandUseItem != keyInteractable)
+                    MarkHandItemDrawnForUse(keyInteractable);
+
+                waitingForHandReady = true;
+                return false;
+            }
+
+            return true;
+        }
+
+        if (!TryPrepareItemInHand(keyInteractable))
+        {
+            if (npcInventory.GetHandItem() == keyInteractable && !IsPreparedHandItemReady(keyInteractable))
+                waitingForHandReady = true;
+
+            return false;
+        }
+
+        return true;
     }
 
     private bool TryPrepareItemInHand(Interactable desiredItem)
@@ -3181,127 +3247,452 @@ private void HandleRestingState()
         if (controller == null)
             return false;
 
-        if (controller.IsLocked && !HasMatchingInventoryKey(controller))
-        {
-            routeCoordinator.TryPushLockedDoorSubgoal(door, controller.RequiredKeyId, destination, destination, currentNeedType, currentNeedActionIsUrgentDriven, "blocked-route");
-            RememberLockedDoor(door);
-            if (TryAcquireMatchingKeyForLockedDoor(controller.RequiredKeyId))
-                return true;
-            return false;
-        }
-
         if (controller.IsOpen)
         {
             if (routeCoordinator.TryPeekTopSubgoal(out NpcRouteCoordinator.RouteSubgoal topSubgoal) && topSubgoal.blockedDoor == door)
             {
                 routeCoordinator.PopTopSubgoal("blocked door already open");
                 TryResumeParentGoalAfterSubgoal();
+                return true;
             }
 
-            pendingDoorTarget = null;
-            hasPendingDoorDestination = false;
+            ResetPendingDoorState();
             agent.ResetPath();
-            RepathCurrentMovementDestination();
+            BeginMovementGoal(destination);
+            agent.SetDestination(destination);
             ResetStallTimer();
             return true;
         }
 
-        pendingDoorTarget = door;
-        pendingDoorDestination = destination;
-        hasPendingDoorDestination = true;
-        agent.ResetPath();
-        MarkMovementProgress("door-handling-queued");
-        ResetStallTimer();
+        QueueDoorHandling(door, destination, "blocked-route");
         return true;
     }
 
+    // Stabilized pending-door flow:
+    // detect blocking door -> approach door anchor -> unlock/interact -> repath original destination
+    // if that route stops making progress, try one local reposition and then fail upward explicitly.
     private bool HandlePendingDoorTarget()
-{
-    if (pendingDoorTarget == null)
-        return false;
-
-    DoorController controller = pendingDoorTarget.GetDoorController();
-    if (controller == null)
     {
-        pendingDoorTarget = null;
-        hasPendingDoorDestination = false;
-        return false;
-    }
-
-    if (controller.IsOpen)
-    {
-        if (routeCoordinator.TryPeekTopSubgoal(out NpcRouteCoordinator.RouteSubgoal topSubgoal) && topSubgoal.blockedDoor == pendingDoorTarget)
-        {
-            routeCoordinator.PopTopSubgoal("blocked door opened while pending");
-            TryResumeParentGoalAfterSubgoal();
-        }
-
-        pendingDoorTarget = null;
-        Vector3 repathDestination = hasPendingDoorDestination ? pendingDoorDestination : transform.position;
-        hasPendingDoorDestination = false;
-        agent.ResetPath();
-        agent.SetDestination(repathDestination);
-        ResetStallTimer();
-        return true;
-    }
-
-    Vector3 doorPoint = pendingDoorTarget.GetInteractionPoint();
-    agent.speed = GetActionMoveSpeed();
-    agent.SetDestination(doorPoint);
-
-    if (!agent.pathPending && agent.remainingDistance <= Mathf.Max(doorStopDistance, pendingDoorTarget.interactionRange))
-    {
-        if (!pendingDoorTarget.CanInteract(gameObject))
-        {
-            pendingDoorTarget = null;
-            hasPendingDoorDestination = false;
+        if (pendingDoorTarget == null)
             return false;
+
+        DoorInteractable door = pendingDoorTarget;
+        DoorController controller = door.GetDoorController();
+        if (controller == null || !door.isEnabled)
+        {
+            FailPendingDoorHandling("door became invalid");
+            return true;
         }
 
-        if (!controller.IsOpen && controller.IsLocked)
+        if (controller.IsOpen)
         {
-            DoorUnlockAttempt unlockAttempt = TryUseInventoryKeyOnDoor(pendingDoorTarget);
+            CompletePendingDoorHandling("blocked door opened while pending");
+            return true;
+        }
 
-            if (unlockAttempt == DoorUnlockAttempt.WaitingForHandReady)
-            {
+        if (!door.CanInteract(gameObject))
+        {
+            FailPendingDoorHandling("door no longer interactable");
+            return true;
+        }
+
+        Vector3 doorAnchor = GetPendingDoorAnchorPoint(door);
+        UpdatePendingDoorProgress(doorAnchor);
+
+        if (HasPendingDoorTimedOut(controller))
+        {
+            if (TryStartPendingDoorRecovery(door, doorAnchor, "timeout"))
                 return true;
-            }
 
-            if (unlockAttempt == DoorUnlockAttempt.Failed)
-            {
-                RememberLockedDoor(pendingDoorTarget);
-                Vector3 blockedDestination = hasPendingDoorDestination ? pendingDoorDestination : transform.position;
-                routeCoordinator.TryPushLockedDoorSubgoal(pendingDoorTarget, controller.RequiredKeyId, blockedDestination, blockedDestination, currentNeedType, currentNeedActionIsUrgentDriven, "unlock-failed");
+            FailPendingDoorHandling("pending door timed out");
+            return true;
+        }
 
-                if (TryAcquireMatchingKeyForLockedDoor(controller.RequiredKeyId))
-                    return true;
+        Vector3 approachPoint = GetPendingDoorApproachPoint(door);
+        agent.speed = GetActionMoveSpeed();
+        BeginMovementGoal(approachPoint);
+        agent.SetDestination(approachPoint);
 
-                pendingDoorTarget = null;
-                hasPendingDoorDestination = false;
-                return false;
-            }
+        if (pendingDoorRuntime.phase == PendingDoorPhase.Repositioning && IsAtPendingDoorApproachPoint(approachPoint))
+        {
+            pendingDoorRuntime.phase = PendingDoorPhase.ApproachingAnchor;
+            pendingDoorRuntime.hasRecoveryPoint = false;
+            pendingDoorRuntime.lastProgressTime = Time.time;
+            MarkMovementProgress("pending-door-reposition-arrived");
+            LogPendingDoorInfo($"Pending door recovered by reposition: door={door.name}");
+        }
+
+        if (!IsWithinPendingDoorInteractionRange(door, doorAnchor))
+            return true;
+
+        FaceTowardsPoint(doorAnchor);
+
+        if (controller.IsLocked)
+        {
+            if (TryHandleLockedPendingDoor(door, controller))
+                return true;
         }
 
         if (Time.time < lastDoorInteractTime + doorInteractCooldown)
             return true;
 
+        pendingDoorRuntime.lastProgressTime = Time.time;
         pendingDoorTarget.Interact(gameObject);
         lastDoorInteractTime = Time.time;
-
+        MarkMovementProgress("pending-door-interact");
         ResetStallTimer();
-    }
 
-    return true;
-}
+        if (controller.IsOpen)
+            CompletePendingDoorHandling("pending door interacted open");
+
+        return true;
+    }
 
     private void QueueDoorHandling(DoorInteractable door, Vector3 destination)
     {
+        QueueDoorHandling(door, destination, "route");
+    }
+
+    private void QueueDoorHandling(DoorInteractable door, Vector3 destination, string reason)
+    {
+        if (door == null)
+            return;
+
+        bool startedNewDoor = pendingDoorTarget != door || pendingDoorRuntime.phase == PendingDoorPhase.None;
         pendingDoorTarget = door;
         pendingDoorDestination = destination;
         hasPendingDoorDestination = true;
+
+        if (startedNewDoor)
+        {
+            Vector3 doorAnchor = GetPendingDoorAnchorPoint(door);
+            pendingDoorRuntime = new PendingDoorRuntime
+            {
+                phase = PendingDoorPhase.ApproachingAnchor,
+                startTime = Time.time,
+                bestDistance = Vector3.Distance(transform.position, doorAnchor),
+                lastProgressTime = Time.time,
+                repositionAttempted = false,
+                hasRecoveryPoint = false,
+                recoveryPoint = Vector3.zero
+            };
+
+            LogPendingDoorInfo($"Pending door started: door={door.name}, reason={reason}");
+        }
+
         agent.ResetPath();
+        Vector3 approachPoint = GetPendingDoorApproachPoint(door);
+        BeginMovementGoal(approachPoint);
+        agent.SetDestination(approachPoint);
         MarkMovementProgress("door-handling-queued");
         ResetStallTimer();
+    }
+
+    private void ResetPendingDoorState()
+    {
+        pendingDoorTarget = null;
+        pendingDoorDestination = Vector3.zero;
+        hasPendingDoorDestination = false;
+        pendingDoorRuntime = default;
+    }
+
+    private Vector3 GetPendingDoorAnchorPoint(DoorInteractable door)
+    {
+        return door != null ? door.GetInteractionPoint() : transform.position;
+    }
+
+    private Vector3 GetPendingDoorApproachPoint(DoorInteractable door)
+    {
+        if (pendingDoorRuntime.hasRecoveryPoint)
+            return pendingDoorRuntime.recoveryPoint;
+
+        return GetPendingDoorAnchorPoint(door);
+    }
+
+    private void UpdatePendingDoorProgress(Vector3 doorAnchor)
+    {
+        float currentDistance = Vector3.Distance(transform.position, doorAnchor);
+        if (currentDistance + pendingDoorProgressDistanceThreshold >= pendingDoorRuntime.bestDistance)
+            return;
+
+        pendingDoorRuntime.bestDistance = currentDistance;
+        pendingDoorRuntime.lastProgressTime = Time.time;
+        MarkMovementProgress("pending-door-progress");
+    }
+
+    private bool HasPendingDoorTimedOut(DoorController controller)
+    {
+        float elapsed = Time.time - pendingDoorRuntime.startTime;
+        if (elapsed >= Mathf.Max(0.1f, pendingDoorMaxDuration))
+        {
+            LogPendingDoorWarning($"Pending door timed out: door={pendingDoorTarget?.name}, reason=max-duration, elapsed={elapsed:F2}s");
+            return true;
+        }
+
+        if (ShouldSuspendPendingDoorNoProgressTimeout(controller))
+            return false;
+
+        float noProgressElapsed = Time.time - pendingDoorRuntime.lastProgressTime;
+        if (noProgressElapsed < Mathf.Max(0.1f, pendingDoorNoProgressTimeout))
+            return false;
+
+        LogPendingDoorWarning($"Pending door timed out: door={pendingDoorTarget?.name}, reason=no-progress, elapsed={noProgressElapsed:F2}s");
+        return true;
+    }
+
+    private bool ShouldSuspendPendingDoorNoProgressTimeout(DoorController controller)
+    {
+        if (Time.time < lastDoorInteractTime + doorInteractCooldown)
+            return true;
+
+        return controller != null && controller.IsLocked && IsPendingDoorWaitingForPreparedKey(controller);
+    }
+
+    private bool IsPendingDoorWaitingForPreparedKey(DoorController controller)
+    {
+        if (controller == null || npcInventory == null || string.IsNullOrWhiteSpace(controller.RequiredKeyId))
+            return false;
+
+        if (!npcInventory.TryGetMatchingKey(controller.RequiredKeyId, out IKeyItem matchingKey))
+            return false;
+
+        Interactable keyInteractable = matchingKey as Interactable;
+        if (keyInteractable == null)
+            return false;
+
+        return npcInventory.GetHandItem() == keyInteractable && !IsPreparedHandItemReady(keyInteractable);
+    }
+
+    private bool IsAtPendingDoorApproachPoint(Vector3 approachPoint)
+    {
+        float arrivalDistance = Mathf.Max(0.1f, pendingDoorRecoveryArrivalDistance);
+        if (Vector3.Distance(transform.position, approachPoint) <= arrivalDistance)
+            return true;
+
+        return !agent.pathPending && agent.hasPath && agent.remainingDistance <= arrivalDistance;
+    }
+
+    private bool IsWithinPendingDoorInteractionRange(DoorInteractable door, Vector3 doorAnchor)
+    {
+        float interactionDistance = Mathf.Max(doorStopDistance, door != null ? door.interactionRange : 0f);
+        if (Vector3.Distance(transform.position, doorAnchor) <= interactionDistance)
+            return true;
+
+        return !agent.pathPending && agent.hasPath && agent.remainingDistance <= interactionDistance;
+    }
+
+    private bool TryFindPendingDoorRecoveryPoint(Vector3 doorAnchor, out Vector3 recoveryPoint)
+    {
+        float sampleRadius = Mathf.Max(0.2f, pendingDoorRecoverySampleRadius);
+
+        for (int i = 0; i < 8; i++)
+        {
+            Vector2 offset = Random.insideUnitCircle * sampleRadius;
+            Vector3 candidate = doorAnchor + new Vector3(offset.x, 0f, offset.y);
+
+            if (!NavMesh.SamplePosition(candidate, out NavMeshHit hit, sampleRadius, NavMesh.AllAreas))
+                continue;
+
+            if (Vector3.Distance(hit.position, doorAnchor) <= 0.1f)
+                continue;
+
+            if (!HasPointClearance(hit.position))
+                continue;
+
+            if (!IsPathReachable(hit.position))
+                continue;
+
+            recoveryPoint = hit.position;
+            return true;
+        }
+
+        recoveryPoint = doorAnchor;
+        return false;
+    }
+
+    private bool TryStartPendingDoorRecovery(DoorInteractable door, Vector3 doorAnchor, string reason)
+    {
+        if (door == null || pendingDoorRuntime.repositionAttempted)
+            return false;
+
+        if (!TryFindPendingDoorRecoveryPoint(doorAnchor, out Vector3 recoveryPoint))
+            return false;
+
+        pendingDoorRuntime.repositionAttempted = true;
+        pendingDoorRuntime.phase = PendingDoorPhase.Repositioning;
+        pendingDoorRuntime.hasRecoveryPoint = true;
+        pendingDoorRuntime.recoveryPoint = recoveryPoint;
+        pendingDoorRuntime.lastProgressTime = Time.time;
+
+        agent.ResetPath();
+        BeginMovementGoal(recoveryPoint);
+        agent.SetDestination(recoveryPoint);
+        MarkMovementProgress("pending-door-reposition");
+        LogPendingDoorInfo($"Pending door reposition attempt: door={door.name}, reason={reason}");
+        return true;
+    }
+
+    private bool TryHandleLockedPendingDoor(DoorInteractable door, DoorController controller)
+    {
+        if (door == null || controller == null)
+        {
+            FailPendingDoorHandling("locked door data missing");
+            return true;
+        }
+
+        if (!HasMatchingInventoryKey(controller))
+        {
+            if (TryEscalatePendingDoorToSubgoal(door, controller, "pending-door-no-key"))
+                return true;
+
+            FailPendingDoorHandling("locked door has no reachable key path");
+            return true;
+        }
+
+        DoorUnlockAttempt unlockAttempt = TryUseInventoryKeyOnDoor(door);
+        if (unlockAttempt == DoorUnlockAttempt.WaitingForHandReady)
+        {
+            pendingDoorRuntime.lastProgressTime = Time.time;
+            MarkMovementProgress("pending-door-key-prep");
+            return true;
+        }
+
+        if (unlockAttempt == DoorUnlockAttempt.Unlocked)
+        {
+            pendingDoorRuntime.lastProgressTime = Time.time;
+            MarkMovementProgress("pending-door-unlocked");
+            ResetStallTimer();
+            return false;
+        }
+
+        if (TryStartPendingDoorRecovery(door, GetPendingDoorAnchorPoint(door), "unlock-failed"))
+            return true;
+
+        FailPendingDoorHandling("locked door remained unresolved after key retry");
+        return true;
+    }
+
+    private bool TryEscalatePendingDoorToSubgoal(DoorInteractable door, DoorController controller, string reason)
+    {
+        if (door == null || controller == null || string.IsNullOrWhiteSpace(controller.RequiredKeyId))
+            return false;
+
+        Vector3 blockedDestination = hasPendingDoorDestination ? pendingDoorDestination : GetPendingDoorAnchorPoint(door);
+        bool pushed = routeCoordinator.TryPushLockedDoorSubgoal(
+            door,
+            controller.RequiredKeyId,
+            blockedDestination,
+            blockedDestination,
+            currentNeedType,
+            currentNeedActionIsUrgentDriven,
+            reason);
+
+        RememberLockedDoor(door);
+        if (pushed)
+            LogPendingDoorInfo($"Pending door escalated to subgoal: door={door.name}, key={controller.RequiredKeyId}, reason={reason}");
+
+        ResetPendingDoorState();
+        agent.ResetPath();
+        ClearMovementGoal();
+        ResetStallTimer();
+        return TryProcessTopSubgoal();
+    }
+
+    private void CompletePendingDoorHandling(string reason)
+    {
+        DoorInteractable resolvedDoor = pendingDoorTarget;
+        bool hadPendingDestination = hasPendingDoorDestination;
+        Vector3 repathDestination = pendingDoorDestination;
+        bool wasTopSubgoalDoor = routeCoordinator.TryPeekTopSubgoal(out NpcRouteCoordinator.RouteSubgoal topSubgoal) && topSubgoal.blockedDoor == resolvedDoor;
+
+        ResetPendingDoorState();
+        agent.ResetPath();
+        ClearMovementGoal();
+        ResetStallTimer();
+
+        if (wasTopSubgoalDoor)
+        {
+            routeCoordinator.PopTopSubgoal(reason);
+            TryResumeParentGoalAfterSubgoal();
+            return;
+        }
+
+        if (hadPendingDestination)
+        {
+            BeginMovementGoal(repathDestination);
+            agent.SetDestination(repathDestination);
+            return;
+        }
+
+        RepathCurrentMovementDestination();
+    }
+
+    private void FailPendingDoorHandling(string reason)
+    {
+        DoorInteractable failedDoor = pendingDoorTarget;
+        bool wasTopSubgoalDoor = routeCoordinator.TryPeekTopSubgoal(out NpcRouteCoordinator.RouteSubgoal topSubgoal) && topSubgoal.blockedDoor == failedDoor;
+
+        LogPendingDoorWarning($"Pending door failed completely: door={failedDoor?.name}, reason={reason}, state={currentState}");
+
+        ResetPendingDoorState();
+        agent.ResetPath();
+        ClearMovementGoal();
+        ResetStallTimer();
+
+        if (wasTopSubgoalDoor)
+        {
+            routeCoordinator.PopTopSubgoal("pending door failure");
+            if (TryResumeParentGoalAfterSubgoal())
+                return;
+        }
+
+        switch (currentState)
+        {
+            case AIState.Explore:
+                if (hasExplorePoint)
+                    RememberLocation(currentExplorePoint);
+                hasExplorePoint = false;
+                exploreTimer = 0f;
+                break;
+
+            case AIState.MoveToTarget:
+            case AIState.MoveToRememberedTarget:
+                HandleNeedActionFailure();
+                return;
+
+            default:
+                if (HasUrgentNeed())
+                    ChangeState(AIState.Explore);
+                else
+                    ChangeState(AIState.IdleWander);
+                break;
+        }
+    }
+
+    private bool TryRedirectPartialPathToPendingDoor(Vector3 destination, string contextTag)
+    {
+        if (pendingDoorTarget != null || agent == null || !agent.isOnNavMesh || agent.pathPending || !agent.hasPath)
+            return false;
+
+        if (agent.pathStatus == NavMeshPathStatus.PathComplete)
+            return false;
+
+        if (!TryGetBlockingDoorTowards(destination, out DoorInteractable blockingDoor))
+            return false;
+
+        DebugMovement($"[{contextTag}] Redirecting partial path through door {blockingDoor.name}");
+        QueueDoorHandling(blockingDoor, destination, "partial-path");
+        return true;
+    }
+
+    private void LogPendingDoorInfo(string message)
+    {
+        Debug.Log($"{name}: {message}");
+    }
+
+    private void LogPendingDoorWarning(string message)
+    {
+        Debug.LogWarning($"{name}: {message}");
     }
 
     private bool HasMatchingInventoryKey(DoorController controller)
@@ -3408,14 +3799,12 @@ private void HandleRestingState()
             return true;
         }
 
-        pendingDoorTarget = subgoal.blockedDoor;
-        pendingDoorDestination = subgoal.blockedDestination;
-        hasPendingDoorDestination = true;
         hasExplorePoint = false;
         hasIdlePoint = false;
         if (currentState == AIState.IdleWander)
             ChangeState(AIState.Explore);
 
+        QueueDoorHandling(subgoal.blockedDoor, subgoal.blockedDestination, "resume-subgoal");
         DebugMovement($"Resuming subgoal for door={subgoal.blockedDoor.name}, depth={routeCoordinator.SubgoalCount}");
         return true;
     }
@@ -3517,8 +3906,7 @@ private void HandleRestingState()
 
     private bool CommitMatchingKeyTarget(Interactable keyTarget, RememberedInteractable rememberedKeyMemory, bool isVisibleKey)
     {
-        pendingDoorTarget = null;
-        hasPendingDoorDestination = false;
+        ResetPendingDoorState();
         currentExploreDoorRouteAttempts = 0;
 
         currentTarget = keyTarget;
