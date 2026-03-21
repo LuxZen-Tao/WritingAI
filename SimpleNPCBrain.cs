@@ -3332,7 +3332,7 @@ private void HandleRestingState()
             return false;
 
         IKeyItem keyItem = target as IKeyItem;
-        return keyItem != null && keyItem.GetKeyId() == subgoal.requiredKeyId;
+        return keyItem != null && DoorController.KeyIdsMatch(subgoal.requiredKeyId, keyItem.GetKeyId());
     }
 
     private bool IsInventoryReadyForTopSubgoal(NpcRouteCoordinator.RouteSubgoal subgoal, out DoorController controller)

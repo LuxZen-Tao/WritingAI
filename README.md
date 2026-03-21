@@ -1,250 +1,185 @@
-# 🧠 WritingAI — Emergent NPC AI Sandbox (Unity)
+# WritingAI
 
-WritingAI is a Unity prototype focused on **needs-driven, environment-aware NPC behavior**.
+WritingAI is a Unity NPC sandbox built around needs, perception, memory, navigation, and world interaction rather than fixed scripted sequences.
 
-Instead of scripting exact actions, the NPC:
-- tracks internal needs,
-- observes the world through vision,
-- remembers useful things,
-- navigates with NavMesh,
-- interacts with world objects,
-- and adapts when the world changes.
+The current repository is centered on a single NPC runtime that can:
+- track comfort, hunger, and energy
+- observe interactables and room lighting
+- remember useful objects and places
+- carry and use inventory items
+- resolve locked-door routes by finding matching keys
+- perform downtime activities when no urgent need is active
 
----
+## Runtime Architecture
 
-## Project Goal
+### `SimpleNPCBrain`
+Primary orchestrator for:
+- state changes
+- need-driven target acquisition
+- movement and interaction flow
+- opportunistic pickups and comfort actions
+- rest/activity sessions
+- locked-door recovery and subgoal resumption
+- runtime guardrails and narration hooks
 
-Build a scalable AI loop where adding new interactables and environments increases behavioral depth **without rewriting core logic**.
+### `NeedsManager`
+Owns need values, urgency bands, passive decay/recovery, and need priority scoring.
 
-This repository currently prioritizes:
-- reliability of the core loop,
-- clarity of state/action flow,
-- and guardrails that surface setup/wiring mistakes early.
+Current built-in needs:
+- `Comfort`
+- `Hunger`
+- `Energy`
 
----
+### `NpcPerceptionService`
+Encapsulates world queries for:
+- visible interactables
+- point visibility checks
+- visible matching-key lookup
+- blocking-door probes toward a destination
 
-## Core Runtime Architecture
+### `NpcMemoryService`
+Owns memory writes and cleanup for:
+- remembered interactables
+- remembered comfort zones
+- recently visited locations
+- remembered locked doors
+- remembered target lookups for need solving and activities
 
-### 1) `SimpleNPCBrain` (orchestrator)
-`SimpleNPCBrain` is the central coordinator for:
-- state transitions,
-- movement/action sequencing,
-- interaction execution,
-- opportunistic actions,
-- locked-door fallback and key acquisition triggers.
+### `NpcRouteCoordinator`
+Handles movement recovery and subgoal state for blocked routes:
+- stall detection
+- soft repath / offset approach / unstuck attempts
+- locked-door key-retrieval subgoals
+- parent-goal resumption after subgoal completion
 
-### 2) `NpcPerceptionService`
-Encapsulates perception and probe helpers:
-- point/interactable visibility checks,
-- visible interactable scans,
-- visible matching-key selection,
-- door-blocking probes toward destinations.
+### `NPCInventory`
+Provides:
+- pocket inventory slots
+- a visible hand slot
+- hand draw/use delays
+- inventory lookup for need items and keys
+- pickup value comparisons for swap decisions
 
-### 3) `NpcMemoryService`
-Encapsulates NPC memory operations:
-- remember/update/cleanup for interactables,
-- comfort-zone memory,
-- location memory (recently visited positions),
-- locked-door memory,
-- remembered matching-key lookup.
+## Main World Contracts
 
-### 4) Interactable + Inventory ecosystem
-- `Interactable` base class for world actions.
-- `INeedSatisfier` for need-relevant objects.
-- `IPickupable` for carriable items.
-- `IKeyItem` for key/lock matching.
-- `NPCInventory` for carrying, swapping, and key lookup.
+### Base types
+- `Interactable`: common interaction base
+- `INeedSatisfier`: objects that satisfy a need
+- `IPickupable`: objects that can be carried
+- `IKeyItem`: key identity contract for locks
+- `IActivityInteractable`: downtime activity contract
 
----
+### Need / recovery interactables
+- `FoodInteractable`
+- `AppleInteractable`
+- `RestInteractable`
+- `ChairInteractable`
+- `BedInteractable`
+- `LightSwitchInteractable`
 
-## Current Gameplay Loop (High Level)
+### Door and key loop
+- `DoorController`: open / close / lock state, motion, nav blocking
+- `DoorInteractable`: world-facing door interaction point
+- `KeyInteractable`: pickupable key with case-insensitive key matching via `DoorController.KeyIdsMatch`
 
-1. NPC evaluates need urgency.
-2. NPC passively observes visible interactables/comfort areas.
-3. NPC chooses visible or remembered targets.
-4. NPC moves, handles doors, and interacts.
-5. NPC updates memory + returns to idle/explore when stabilized.
+### Downtime activities
+- `ActivityInteractable`
+- `ObservationZoneInteractable`
 
-The loop supports:
-- need-driven actions,
-- opportunistic pickups,
-- memory-guided retries,
-- and door/key handling.
+### Environment
+- `RoomArea`: room bounds, daylight participation, artificial lighting
+- `WorldArea`: coarse daytime state
 
----
+## Runtime Flow
 
-## Locked Door + Key Flow
+1. `NeedsManager` updates needs each frame from environment state.
+2. `SimpleNPCBrain` cleans memory and passively observes visible objects and comfort zones.
+3. If a route is blocked by a locked door, the brain records the door and pushes a key-retrieval subgoal.
+4. The NPC chooses a visible target, a remembered target, a remembered lit room, or an explore point.
+5. `NpcRouteCoordinator` monitors movement progress and attempts recovery if the route stalls.
+6. On arrival, the NPC interacts, rests, performs an activity, picks up an item, or unlocks a door.
+7. After the action resolves, the NPC either continues solving urgent needs or returns to idle wandering.
 
-When pathing is blocked by a locked door:
-1. NPC remembers the locked door and required key id.
-2. NPC tries to acquire a **visible** matching key first.
-3. If none visible, NPC tries a **remembered** matching key.
-4. NPC picks up key, returns to door flow, unlocks via inventory key usage.
-5. If no key is available, fallback behavior continues without hard-locking.
+## Memory Model
 
----
+The NPC stores four distinct memory types:
+- `RememberedInteractable`
+- `RememberedComfortZone`
+- `RememberedLocation`
+- `RememberedLockedDoor`
 
-## Reliability / Guardrail Features
+This allows the NPC to:
+- retry unseen targets from memory
+- remember lit rooms
+- avoid recently visited dead ends
+- resume a blocked mission after finding a key
 
-This project now includes guardrails to reduce silent failures:
+## Reliability and Wiring Guardrails
 
-- Runtime invariant checks in `SimpleNPCBrain` (throttled warnings):
-  - conflicting target modes,
-  - invalid remembered-target state,
-  - invalid pending door references,
-  - invalid disabled active targets,
-  - key-memory leakage into need-target resolution.
+The repo now includes runtime validation and invariants for common Unity setup mistakes:
+- missing `NavMeshAgent`, `NeedsManager`, `NPCInventory`, eye point, or trigger collider
+- empty interactable / door layer masks
+- pickupables without colliders
+- `DoorInteractable` without a parent `DoorController`
+- conflicting active target modes in the brain
+- invalid remembered-target and pending-door state
 
-- Runtime setup validation:
-  - missing eye point / layer masks / inventory / trigger collider,
-  - missing door controller chain,
-  - missing pickup colliders.
+Editor-time validation is also present in:
+- `DoorController`
+- `DoorInteractable`
+- `KeyInteractable`
 
-- Editor-time validation (`OnValidate`) in:
-  - `DoorController`,
-  - `DoorInteractable`,
-  - `KeyInteractable`.
+## Script Layout
 
----
-
-## Setup & Scene Wiring
-
-For exact scene requirements and debugging workflow, use:
-
-👉 **[`SCENE_SETUP_CHECKLIST.md`](SCENE_SETUP_CHECKLIST.md)**
-
-It covers:
-- required NPC components,
-- layer setup,
-- collider expectations,
-- room trigger assumptions,
-- door hierarchy expectations,
-- navmesh assumptions,
-- key/locked-door sanity checklist.
-
----
-
-## Main Systems in This Repo
-
-- Needs: `NeedsManager`, `NeedType`
-- Brain: `SimpleNPCBrain`
-- Perception: `NpcPerceptionService`
-- Memory: `NpcMemoryService`
-- Interaction: `Interactable` + concrete interactables (food, key, switch, door)
-- Inventory: `NPCInventory`
-- Environment context: `RoomArea`, `WorldArea`
-- Door/lock model: `DoorController`, `DoorInteractable`, `IKeyItem`
-- Thought logging: `NPCThoughtLogger`
-
----
-
-## Development Notes
-
-- This is an active prototype; expect iterative stabilization/refactor passes.
-- Current focus is reliability and maintainability of the existing core loop.
-- New behavior features should be added only after core loop validation remains stable.
-- Configurable `maxSlots` (default 3)
-- Items are hidden from the world while held
-- When urgently hungry, the NPC checks its inventory first before searching the world
-- When picking up food opportunistically (low hunger band), the NPC stores it for later
-- If inventory is full but a more valuable item is available, the NPC drops its least-precious item and picks up the better one
-
-### 🔹 Room & Environment System
-
-#### 🏠 RoomArea
-
-- Defines environmental context for a space
-- Tracks:
-  - Artificial lights (switch-controlled)
-  - Natural light (daylight)
-- Determines if a space is lit or dark
-
-#### ☀️ Lighting Model
-
-- Natural light (e.g., sun through windows) is independent of switches
-- Artificial light is controlled by `LightSwitchInteractable`
-- NPC **comfort depends on actual room brightness**, not interaction rewards
-
-### 🔹 Light Switch Behaviour
-
-- Toggles artificial lights only
-- Does **NOT** directly modify NPC comfort
-- Changes the environment, which then affects the NPC over time
-
-## 🔁 Behaviour Loop
-
-```
-Need decreases (e.g., dark room)
-  → NPC decides it needs comfort
-  → Searches or recalls a solution
-  → Moves to target
-  → Interacts (e.g., turns on light)
-  → Environment changes (room becomes lit)
-  → Comfort recovers over time
-  → NPC returns to idle wandering
+```text
+WritingAI/
+|- SimpleNPCBrain.cs
+|- NeedsManager.cs
+|- NpcPerceptionService.cs
+|- NpcMemoryService.cs
+|- NpcRouteCoordinator.cs
+|- NPCInventory.cs
+|- NPCThoughtLogger.cs
+|- Interactable.cs
+|- INeedSatisfier.cs
+|- IPickupable.cs
+|- IKeyItem.cs
+|- IActivityInteractable.cs
+|- DoorController.cs
+|- DoorInteractable.cs
+|- KeyInteractable.cs
+|- LightSwitchInteractable.cs
+|- FoodInteractable.cs
+|- AppleInteractable.cs
+|- RestInteractable.cs
+|- ChairInteractable.cs
+|- BedInteractable.cs
+|- ActivityInteractable.cs
+|- ObservationZoneInteractable.cs
+|- RoomArea.cs
+|- WorldArea.cs
+|- RememberedInteractable.cs
+|- RememberedComfortZone.cs
+|- RememberedLocation.cs
+|- RememberedLockedDoor.cs
+|- NeedType.cs
+|- ActivityType.cs
+|- SCENE_SETUP_CHECKLIST.md
+|- PROJECT_AUDIT_REPORT.md
 ```
 
-## 🧠 Design Philosophy
+## Scene Setup
 
-- **Systems over scripts** — behaviour emerges from interacting rules, not handwritten sequences
-- **Environment-driven outcomes** — the world state determines NPC wellbeing
-- **Interruptible goals** — the NPC abandons actions when conditions change
-- **Memory-informed decisions** — past observations guide future behaviour
-- **Small rules → emergent behaviour** — complexity arises naturally as systems layer together
+Use [`SCENE_SETUP_CHECKLIST.md`](SCENE_SETUP_CHECKLIST.md) for the authoritative scene wiring checklist.
 
-## 🧪 Current Features
+Key requirements:
+- NPC root must have `SimpleNPCBrain`, `NavMeshAgent`, and `NeedsManager`
+- `NPCInventory` is strongly recommended for food storage and key usage
+- the NPC collider should be a trigger for room overlap tracking
+- interactables and doors must be placed on the queried layers
+- locked doors need a valid `requiredKeyId`
+- matching keys must share the same key id
 
-- ✅ Needs-driven AI (Comfort + Hunger)
-- ✅ Modular `NeedsManager` foundation for additional needs
-- ✅ `FoodInteractable` base class — shared food logic (hunger restore, pickup, inventory)
-- ✅ `AppleInteractable` — extends `FoodInteractable` with apple-specific defaults
-- ✅ NPC inventory (`NPCInventory`) — carry food for later use
-- ✅ Inventory-first hunger resolution — NPC uses held food before searching the world
-- ✅ Opportunistic food pickup — NPC stores food when hunger is low rather than eating immediately
-- ✅ Inventory swap — NPC drops least-precious item to collect a more valuable world item
-- ✅ `IPickupable` interface — any interactable can become a carriable item
-- ✅ Vision-based perception (FOV + raycasting)
-- ✅ Passive world observation during all states
-- ✅ Interactable memory (object + need + last known position)
-- ✅ Location memory with time-based decay
-- ✅ Idle wandering behaviour
-- ✅ NavMesh navigation with per-context speeds
-- ✅ Room-based lighting system
-- ✅ Separation of daylight vs artificial lighting
-- ✅ Dynamic goal interruption (need urgency checks in all active states)
+## Current Status
 
-## 🔮 Future Improvements
-
-- Multiple needs (hunger, energy, social, etc.)
-- Advanced memory (room familiarity, priority weighting)
-- Time-of-day system (global day/night cycle)
-- Multiple interactables per need (e.g., lamps, heaters, chairs)
-- Behaviour trees or utility AI layer
-- Social behaviours (multiple NPCs interacting)
-- Emotional state modelling
-- World simulation (economy, routines, jobs)
-
-## 🎯 Goal
-
-To build a scalable AI system where adding new **needs**, **objects**, and **environments** naturally increases behavioural complexity without rewriting core logic.
-
-## 🛠 Tech Stack
-
-- **Unity** (C#)
-- **NavMesh** Navigation
-- **Physics** (raycasting for vision)
-- Custom AI state system
-
-## ✅ Scene Reliability Checklist
-
-For required component/layer/collider/door/navmesh setup, use:
-
-- [`SCENE_SETUP_CHECKLIST.md`](SCENE_SETUP_CHECKLIST.md)
-
-## 📌 Status
-
-Active development — foundational systems in place, expanding toward richer emergent behaviour.
-
-## 👤 Author
-
-Luke — building systems, games, and ideas that evolve over time.
+This is still a prototype, but the core runtime is now split into clearer services and includes stronger route recovery, memory handling, scene validation, and door/key behavior than the earlier version of the project.
