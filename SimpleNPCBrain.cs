@@ -18,6 +18,7 @@ public class SimpleNPCBrain : MonoBehaviour
         Unlocked
     }
 
+<<<<<<< ours
     private enum PendingDoorPhase
     {
         None,
@@ -52,6 +53,23 @@ public class SimpleNPCBrain : MonoBehaviour
         public bool redirectedToDoor;
         public MovementFailureKind failureKind;
         public NpcRouteCoordinator.MovementRecoveryResult recoveryResult;
+=======
+    private enum RouteSubgoalType
+    {
+        LockedDoorKeyResolution
+    }
+
+    private struct RouteSubgoal
+    {
+        public RouteSubgoalType type;
+        public DoorInteractable blockedDoor;
+        public string requiredKeyId;
+        public Vector3 blockedDestination;
+        public Vector3 originalDestination;
+        public NeedType originatingNeedType;
+        public bool originatedFromUrgentNeed;
+        public string debugLabel;
+>>>>>>> theirs
     }
 
     public enum AIState
@@ -108,11 +126,15 @@ public class SimpleNPCBrain : MonoBehaviour
     public float movementRecoveryUnstuckRadius = 1.0f;
     public float movementPointClearanceRadius = 0.35f;
     public int movementPathFailureLimit = 3;
+<<<<<<< ours
 
     [Header("Movement Point Quality")]
     public float movementPointSampleDistance = 2f;
     public float minimumMovementPointWallDistance = 0.2f;
     public float minimumExploreMoveDistance = 1f;
+=======
+    private float stallTimer = 0f;
+>>>>>>> theirs
 
     [Header("Door Probe")]
     public float doorCheckDistance = 1.75f;
@@ -239,6 +261,15 @@ public class SimpleNPCBrain : MonoBehaviour
     private Vector3 currentActivityLookPoint;
     private bool hasCurrentActivityLookPoint = false;
     private float currentActivityLookTimer = 0f;
+    private readonly List<RouteSubgoal> routeSubgoalStack = new List<RouteSubgoal>();
+
+    private Vector3 activeMovementGoalPosition;
+    private bool hasActiveMovementGoal = false;
+    private float movementGoalStartTime = 0f;
+    private float movementGoalBestDistance = Mathf.Infinity;
+    private float movementLastProgressTime = 0f;
+    private int movementGoalRecoveryAttempts = 0;
+    private int movementPathFailureCount = 0;
 
     private readonly Dictionary<NeedType, NeedsManager.NeedUrgencyBand> lastNeedBands = new Dictionary<NeedType, NeedsManager.NeedUrgencyBand>();
     private readonly Dictionary<NeedType, bool> lastNeedUrgentFlags = new Dictionary<NeedType, bool>();
@@ -360,7 +391,11 @@ private void Update()
             ChangeState(AIState.Explore);
         }
     }
+<<<<<<< ours
     else if (currentNeedActionIsUrgentDriven && IsGoalExecutionState(currentState) && currentState != AIState.Resting && routeCoordinator.SubgoalCount == 0)
+=======
+    else if (currentNeedActionIsUrgentDriven && IsGoalExecutionState(currentState) && currentState != AIState.Resting && routeSubgoalStack.Count == 0)
+>>>>>>> theirs
     {
         Narrate("I feel okay again. Back to wandering.", "return-to-idle-no-urgent");
         AbortCurrentNeedAction();
@@ -381,7 +416,11 @@ private void Update()
 
     if (currentState != AIState.Resting &&
         currentState != AIState.PerformingActivity &&
+<<<<<<< ours
         routeCoordinator.SubgoalCount > 0 &&
+=======
+        routeSubgoalStack.Count > 0 &&
+>>>>>>> theirs
         TryProcessTopSubgoal())
     {
         return;
@@ -663,12 +702,21 @@ private void Update()
             return;
         }
 
+<<<<<<< ours
+=======
+        BeginMovementGoal(currentExplorePoint);
+        agent.SetDestination(currentExplorePoint);
+>>>>>>> theirs
         currentExploreDoorRouteAttempts = 0;
         MovementRouteStepResult routeStep = ExecuteMovementRouteStep(currentExplorePoint, exploreStopDistance, "ExplorePoint");
         if (routeStep.redirectedToDoor)
             return;
 
+<<<<<<< ours
         if (routeStep.failed)
+=======
+        if (TryRecoverMovementGoal(currentExplorePoint, "ExplorePoint"))
+>>>>>>> theirs
         {
             RememberLocation(currentExplorePoint);
             LogMovementFailure("ExplorePoint", currentExplorePoint, routeStep.failureKind, routeStep.recoveryResult);
@@ -716,7 +764,14 @@ private void Update()
             if (!TryGetQualifiedMovementPoint(candidate, minimumExploreMoveDistance, true, out Vector3 qualifiedPoint))
                 continue;
 
+<<<<<<< ours
             if (IsPathReachable(qualifiedPoint))
+=======
+            if (!HasPointClearance(navHit.position))
+                continue;
+
+            if (IsPathReachable(navHit.position))
+>>>>>>> theirs
             {
                 currentExplorePoint = qualifiedPoint;
                 hasExplorePoint = true;
@@ -798,7 +853,14 @@ private void Update()
             if (!room.ContainsPoint(qualifiedPoint))
                 continue;
 
+<<<<<<< ours
             if (!IsPathReachable(qualifiedPoint))
+=======
+            if (!HasPointClearance(navHit.position))
+                continue;
+
+            if (!IsPathReachable(navHit.position))
+>>>>>>> theirs
                 continue;
 
             candidates.Add(qualifiedPoint);
@@ -819,7 +881,14 @@ private void Update()
             if (currentRoom != null && currentRoom.ContainsPoint(qualifiedPoint))
                 continue;
 
+<<<<<<< ours
             if (!IsPathReachable(qualifiedPoint))
+=======
+            if (!HasPointClearance(navHit.position))
+                continue;
+
+            if (!IsPathReachable(navHit.position))
+>>>>>>> theirs
                 continue;
 
             candidates.Add(qualifiedPoint);
@@ -837,7 +906,14 @@ private void Update()
             if (!TryGetQualifiedMovementPoint(candidate, minimumIdleMoveDistance, false, out Vector3 qualifiedPoint))
                 continue;
 
+<<<<<<< ours
             if (!IsPathReachable(qualifiedPoint))
+=======
+            if (!HasPointClearance(navHit.position))
+                continue;
+
+            if (!IsPathReachable(navHit.position))
+>>>>>>> theirs
                 continue;
 
             currentIdlePoint = qualifiedPoint;
@@ -1292,11 +1368,18 @@ private void Update()
 
         agent.speed = GetActionMoveSpeed();
         Vector3 targetPosition = currentTarget.GetInteractionPoint();
+<<<<<<< ours
         MovementRouteStepResult routeStep = ExecuteMovementRouteStep(targetPosition, currentTarget.interactionRange, "CurrentTarget");
         if (routeStep.redirectedToDoor)
             return;
 
         if (routeStep.failed)
+=======
+        BeginMovementGoal(targetPosition);
+        agent.SetDestination(targetPosition);
+
+        if (TryRecoverMovementGoal(targetPosition, "CurrentTarget"))
+>>>>>>> theirs
         {
             RememberLocation(targetPosition);
             LogMovementFailure("CurrentTarget", targetPosition, routeStep.failureKind, routeStep.recoveryResult);
@@ -1342,11 +1425,18 @@ private void Update()
             }
 
             agent.speed = GetActionMoveSpeed();
+<<<<<<< ours
             MovementRouteStepResult comfortRouteStep = ExecuteMovementRouteStep(currentComfortZoneTarget.lastKnownPosition, rememberedComfortZoneStopDistance, "RememberedComfortZone");
             if (comfortRouteStep.redirectedToDoor)
                 return;
 
             if (comfortRouteStep.failed)
+=======
+            BeginMovementGoal(currentComfortZoneTarget.lastKnownPosition);
+            agent.SetDestination(currentComfortZoneTarget.lastKnownPosition);
+
+            if (TryRecoverMovementGoal(currentComfortZoneTarget.lastKnownPosition, "RememberedComfortZone"))
+>>>>>>> theirs
             {
                 RememberLocation(currentComfortZoneTarget.lastKnownPosition);
                 LogMovementFailure("RememberedComfortZone", currentComfortZoneTarget.lastKnownPosition, comfortRouteStep.failureKind, comfortRouteStep.recoveryResult);
@@ -1388,11 +1478,18 @@ private void Update()
             return;
 
         agent.speed = GetActionMoveSpeed();
+<<<<<<< ours
         MovementRouteStepResult rememberedRouteStep = ExecuteMovementRouteStep(currentMemoryTarget.lastKnownPosition, rememberedTargetStopDistance, "RememberedTarget");
         if (rememberedRouteStep.redirectedToDoor)
             return;
 
         if (rememberedRouteStep.failed)
+=======
+        BeginMovementGoal(currentMemoryTarget.lastKnownPosition);
+        agent.SetDestination(currentMemoryTarget.lastKnownPosition);
+
+        if (TryRecoverMovementGoal(currentMemoryTarget.lastKnownPosition, "RememberedTarget"))
+>>>>>>> theirs
         {
             RememberLocation(currentMemoryTarget.lastKnownPosition);
             LogMovementFailure("RememberedTarget", currentMemoryTarget.lastKnownPosition, rememberedRouteStep.failureKind, rememberedRouteStep.recoveryResult);
@@ -3201,6 +3298,7 @@ private void HandleRestingState()
         return bestRoom != null;
     }
 
+<<<<<<< ours
     private NpcRouteCoordinator.MovementRecoverySettings GetMovementRecoverySettings()
     {
         return new NpcRouteCoordinator.MovementRecoverySettings
@@ -3275,11 +3373,69 @@ private void HandleRestingState()
         {
             result.redirectedToDoor = true;
             return result;
+=======
+    private void BeginMovementGoal(Vector3 target)
+    {
+        if (!hasActiveMovementGoal || Vector3.Distance(activeMovementGoalPosition, target) > 0.3f)
+        {
+            activeMovementGoalPosition = target;
+            hasActiveMovementGoal = true;
+            movementGoalStartTime = Time.time;
+            movementGoalBestDistance = Vector3.Distance(transform.position, target);
+            movementLastProgressTime = Time.time;
+            movementGoalRecoveryAttempts = 0;
+            movementPathFailureCount = 0;
+            stallTimer = 0f;
+            DebugMovement($"Begin goal @ {target}");
+        }
+    }
+
+    private void MarkMovementProgress(string reason)
+    {
+        movementLastProgressTime = Time.time;
+        movementPathFailureCount = 0;
+        stallTimer = 0f;
+        DebugMovement($"Progress: {reason}");
+    }
+
+    private void UpdateMovementProgress(Vector3 target)
+    {
+        if (!hasActiveMovementGoal)
+            BeginMovementGoal(target);
+
+        float currentDistance = Vector3.Distance(transform.position, target);
+        if (currentDistance + movementProgressDistanceThreshold < movementGoalBestDistance)
+        {
+            movementGoalBestDistance = currentDistance;
+            MarkMovementProgress("distance");
+        }
+
+        if (!agent.pathPending && agent.hasPath)
+        {
+            if (agent.remainingDistance + movementProgressPathDistanceThreshold < movementGoalBestDistance)
+            {
+                movementGoalBestDistance = agent.remainingDistance;
+                MarkMovementProgress("path-distance");
+            }
+
+            if (agent.pathStatus != NavMeshPathStatus.PathComplete)
+            {
+                movementPathFailureCount++;
+                DebugMovement($"Path degraded ({agent.pathStatus}) failure count {movementPathFailureCount}");
+            }
+        }
+
+        if (agent == null || !agent.isOnNavMesh || agent.pathPending || !agent.hasPath)
+        {
+            stallTimer = 0f;
+            return;
+>>>>>>> theirs
         }
 
         result.recoveryResult = EvaluateMovementRecovery(target, contextTag);
         if (result.recoveryResult.failed)
         {
+<<<<<<< ours
             result.failed = true;
             result.failureKind = ClassifyMovementFailure(target, result.recoveryResult, UsesStrictPointQuality(contextTag));
 
@@ -3356,9 +3512,146 @@ private void HandleRestingState()
         Vector3 target,
         MovementFailureKind failureKind,
         NpcRouteCoordinator.MovementRecoveryResult recoveryResult)
+=======
+            stallTimer = 0f;
+            return;
+        }
+
+        if (agent.velocity.sqrMagnitude < stallVelocityThreshold * stallVelocityThreshold)
+            stallTimer += Time.deltaTime;
+        else
+            stallTimer = 0f;
+    }
+
+    private bool HasMovementGoalTimedOut()
+    {
+        if (!hasActiveMovementGoal)
+            return false;
+
+        if (stallTimer >= stallTimeThreshold)
+        {
+            DebugMovement($"Stall timeout ({stallTimer:F2}s >= {stallTimeThreshold:F2}s)");
+            return true;
+        }
+
+        if (Time.time - movementLastProgressTime >= movementNoProgressTimeout)
+        {
+            DebugMovement($"No-progress timeout ({Time.time - movementLastProgressTime:F2}s >= {movementNoProgressTimeout:F2}s)");
+            return true;
+        }
+
+        if (Time.time - movementGoalStartTime >= movementGoalTimeout)
+        {
+            DebugMovement($"Goal timeout ({Time.time - movementGoalStartTime:F2}s >= {movementGoalTimeout:F2}s)");
+            return true;
+        }
+
+        return false;
+    }
+
+    private bool TryRecoverMovementGoal(Vector3 target, string contextTag)
+    {
+        UpdateMovementProgress(target);
+
+        bool timedOut = HasMovementGoalTimedOut();
+        bool pathFailed = movementPathFailureCount >= Mathf.Max(1, movementPathFailureLimit);
+        bool attemptsExceeded = movementGoalRecoveryAttempts >= Mathf.Max(1, maxMovementRecoveryAttempts);
+        if (!timedOut && !pathFailed && !attemptsExceeded)
+            return false;
+
+        if (attemptsExceeded)
+        {
+            DebugMovement($"[{contextTag}] Abandoning goal after too many recoveries.");
+            ClearMovementGoal();
+            return true;
+        }
+
+        movementGoalRecoveryAttempts++;
+        stallTimer = 0f;
+        DebugMovement($"[{contextTag}] Recovery attempt {movementGoalRecoveryAttempts}");
+
+        if (movementGoalRecoveryAttempts == 1)
+        {
+            agent.ResetPath();
+            agent.SetDestination(target);
+            MarkMovementProgress("soft-repath");
+            return false;
+        }
+
+        if (movementGoalRecoveryAttempts == 2 && TryFindNearbyRecoveryPoint(target, movementRecoverySampleRadius, out Vector3 angledPoint))
+        {
+            agent.ResetPath();
+            agent.SetDestination(angledPoint);
+            MarkMovementProgress("offset-approach");
+            return false;
+        }
+
+        if (movementGoalRecoveryAttempts == 3 && TryFindNearbyRecoveryPoint(transform.position, movementRecoveryUnstuckRadius, out Vector3 unstuckPoint))
+        {
+            agent.ResetPath();
+            agent.SetDestination(unstuckPoint);
+            MarkMovementProgress("local-unstuck");
+            return false;
+        }
+
+        DebugMovement($"[{contextTag}] Recovery exhausted, abandoning local route point.");
+        ClearMovementGoal();
+        return true;
+    }
+
+    private bool TryFindNearbyRecoveryPoint(Vector3 center, float radius, out Vector3 point)
+    {
+        for (int i = 0; i < 8; i++)
+        {
+            Vector2 circle = Random.insideUnitCircle * radius;
+            Vector3 candidate = center + new Vector3(circle.x, 0f, circle.y);
+            if (!NavMesh.SamplePosition(candidate, out NavMeshHit hit, 1.5f, NavMesh.AllAreas))
+                continue;
+
+            if (!HasPointClearance(hit.position))
+                continue;
+
+            if (!IsPathReachable(hit.position))
+                continue;
+
+            point = hit.position;
+            return true;
+        }
+
+        point = center;
+        return false;
+    }
+
+    private bool HasPointClearance(Vector3 point)
+    {
+        if (movementPointClearanceRadius <= 0.01f)
+            return true;
+
+        Collider[] hits = Physics.OverlapSphere(point + Vector3.up * 0.2f, movementPointClearanceRadius, obstacleLayer, QueryTriggerInteraction.Ignore);
+        return hits == null || hits.Length == 0;
+    }
+
+    private void ResetStallTimer()
+>>>>>>> theirs
     {
         DebugMovement(
             $"[{contextTag}] Route failure classified as {failureKind} @ {target} | trigger={recoveryResult.trigger} | action={recoveryResult.action} | path={recoveryResult.pathStatus}");
+    }
+
+    private void ClearMovementGoal()
+    {
+        hasActiveMovementGoal = false;
+        movementGoalRecoveryAttempts = 0;
+        movementPathFailureCount = 0;
+        stallTimer = 0f;
+    }
+
+    private void DebugMovement(string message)
+    {
+        if (!debugMovementRecovery)
+            return;
+
+        Debug.Log($"[SimpleNPCBrain:{name}] {message}");
     }
 
     private bool TryGetBlockingDoorTowards(Vector3 destination, out DoorInteractable door)
@@ -3387,10 +3680,16 @@ private void HandleRestingState()
 
         if (controller.IsOpen)
         {
+<<<<<<< ours
             if (routeCoordinator.TryPeekTopSubgoal(out NpcRouteCoordinator.RouteSubgoal topSubgoal) && topSubgoal.blockedDoor == door)
             {
                 routeCoordinator.PopTopSubgoal("blocked door already open");
                 TryResumeParentGoalAfterSubgoal();
+=======
+            PushLockedDoorSubgoal(door, controller.RequiredKeyId, destination, destination, "blocked-route");
+            RememberLockedDoor(door);
+            if (TryAcquireMatchingKeyForLockedDoor(controller.RequiredKeyId))
+>>>>>>> theirs
                 return true;
             }
 
@@ -3424,6 +3723,7 @@ private void HandleRestingState()
 
         if (controller.IsOpen)
         {
+<<<<<<< ours
             CompletePendingDoorHandling("blocked door opened while pending");
             return true;
         }
@@ -3443,6 +3743,19 @@ private void HandleRestingState()
                 return true;
 
             FailPendingDoorHandling("pending door timed out");
+=======
+            if (PeekCurrentSubgoal(out RouteSubgoal topSubgoal) && topSubgoal.blockedDoor == door)
+            {
+                PopCurrentSubgoal("blocked door already open", out RouteSubgoal resolvedSubgoal);
+                TryResumeParentGoalAfterSubgoal(resolvedSubgoal.originalDestination);
+            }
+
+            pendingDoorTarget = null;
+            hasPendingDoorDestination = false;
+            agent.ResetPath();
+            RepathCurrentMovementDestination();
+            ResetStallTimer();
+>>>>>>> theirs
             return true;
         }
 
@@ -3519,9 +3832,12 @@ private void HandleRestingState()
         }
 
         agent.ResetPath();
+<<<<<<< ours
         Vector3 approachPoint = GetPendingDoorApproachPoint(door);
         BeginMovementGoal(approachPoint);
         agent.SetDestination(approachPoint);
+=======
+>>>>>>> theirs
         MarkMovementProgress("door-handling-queued");
         ResetStallTimer();
     }
@@ -3536,7 +3852,23 @@ private void HandleRestingState()
 
     private Vector3 GetPendingDoorAnchorPoint(DoorInteractable door)
     {
+<<<<<<< ours
         return door != null ? door.GetInteractionPoint() : transform.position;
+=======
+        if (PeekCurrentSubgoal(out RouteSubgoal topSubgoal) && topSubgoal.blockedDoor == pendingDoorTarget)
+        {
+            PopCurrentSubgoal("blocked door opened while pending", out RouteSubgoal resolvedSubgoal);
+            TryResumeParentGoalAfterSubgoal(resolvedSubgoal.originalDestination);
+        }
+
+        pendingDoorTarget = null;
+        Vector3 repathDestination = hasPendingDoorDestination ? pendingDoorDestination : transform.position;
+        hasPendingDoorDestination = false;
+        agent.ResetPath();
+        agent.SetDestination(repathDestination);
+        ResetStallTimer();
+        return true;
+>>>>>>> theirs
     }
 
     private Vector3 GetPendingDoorApproachPoint(DoorInteractable door)
@@ -3683,9 +4015,17 @@ private void HandleRestingState()
             if (TryEscalatePendingDoorToSubgoal(door, controller, "pending-door-no-key"))
                 return true;
 
+<<<<<<< ours
             FailPendingDoorHandling("locked door has no reachable key path");
             return true;
         }
+=======
+            if (unlockAttempt == DoorUnlockAttempt.Failed)
+            {
+                RememberLockedDoor(pendingDoorTarget);
+                Vector3 blockedDestination = hasPendingDoorDestination ? pendingDoorDestination : transform.position;
+                PushLockedDoorSubgoal(pendingDoorTarget, controller.RequiredKeyId, blockedDestination, blockedDestination, "unlock-failed");
+>>>>>>> theirs
 
         DoorUnlockAttempt unlockAttempt = TryUseInventoryKeyOnDoor(door);
         if (unlockAttempt == DoorUnlockAttempt.WaitingForHandReady)
@@ -3774,7 +4114,11 @@ private void HandleRestingState()
 
         ResetPendingDoorState();
         agent.ResetPath();
+<<<<<<< ours
         ClearMovementGoal();
+=======
+        MarkMovementProgress("door-handling-queued");
+>>>>>>> theirs
         ResetStallTimer();
 
         if (wasTopSubgoalDoor)
@@ -3847,24 +4191,122 @@ private void HandleRestingState()
         return npcInventory.TryGetMatchingKey(controller.RequiredKeyId, out _);
     }
 
+<<<<<<< ours
     private void ClearAllSubgoals(string reason)
     {
         routeCoordinator.ClearAllSubgoals(reason);
+=======
+    private bool PushLockedDoorSubgoal(DoorInteractable door, string requiredKeyId, Vector3 blockedDestination, Vector3 originalDestination, string debugLabel = null)
+    {
+        if (door == null || string.IsNullOrWhiteSpace(requiredKeyId))
+            return false;
+
+        if (PeekCurrentSubgoal(out RouteSubgoal topSubgoal) &&
+            topSubgoal.blockedDoor == door &&
+            topSubgoal.requiredKeyId == requiredKeyId)
+        {
+            return false;
+        }
+
+        if (HasSubgoalForDoor(door))
+            return false;
+
+        RouteSubgoal subgoal = new RouteSubgoal
+        {
+            type = RouteSubgoalType.LockedDoorKeyResolution,
+            blockedDoor = door,
+            requiredKeyId = requiredKeyId,
+            blockedDestination = blockedDestination,
+            originalDestination = originalDestination,
+            originatingNeedType = currentNeedType,
+            originatedFromUrgentNeed = currentNeedActionIsUrgentDriven,
+            debugLabel = string.IsNullOrWhiteSpace(debugLabel) ? door.name : debugLabel
+        };
+
+        routeSubgoalStack.Add(subgoal);
+        DebugMovement($"Subgoal pushed: door={door.name}, key={requiredKeyId}, depth={routeSubgoalStack.Count}, label={subgoal.debugLabel}");
+        return true;
+    }
+
+    private bool PeekCurrentSubgoal(out RouteSubgoal subgoal)
+    {
+        if (routeSubgoalStack.Count == 0)
+        {
+            subgoal = default;
+            return false;
+        }
+
+        subgoal = routeSubgoalStack[routeSubgoalStack.Count - 1];
+        return true;
+    }
+
+    private bool PopCurrentSubgoal(string reason, out RouteSubgoal popped)
+    {
+        if (routeSubgoalStack.Count == 0)
+        {
+            popped = default;
+            return false;
+        }
+
+        popped = routeSubgoalStack[routeSubgoalStack.Count - 1];
+        routeSubgoalStack.RemoveAt(routeSubgoalStack.Count - 1);
+        DebugMovement($"Subgoal popped: door={popped.blockedDoor?.name}, reason={reason}, remainingDepth={routeSubgoalStack.Count}");
+        return true;
+    }
+
+    private void ClearAllSubgoals(string reason)
+    {
+        if (routeSubgoalStack.Count == 0)
+            return;
+
+        DebugMovement($"Cleared all subgoals ({routeSubgoalStack.Count}): {reason}");
+        routeSubgoalStack.Clear();
+    }
+
+    private bool HasSubgoalForDoor(DoorInteractable door)
+    {
+        if (door == null)
+            return false;
+
+        for (int i = 0; i < routeSubgoalStack.Count; i++)
+        {
+            if (routeSubgoalStack[i].blockedDoor == door)
+                return true;
+        }
+
+        return false;
+    }
+
+    private bool IsTopSubgoalResolved(RouteSubgoal subgoal, DoorController controller)
+    {
+        return subgoal.blockedDoor == null || controller == null || controller.IsOpen || !controller.IsLocked;
+>>>>>>> theirs
     }
 
     private bool IsCurrentTargetMatchingTopSubgoalKey(Interactable target)
     {
+<<<<<<< ours
         if (target == null || !routeCoordinator.TryPeekTopSubgoal(out NpcRouteCoordinator.RouteSubgoal subgoal))
+=======
+        if (target == null || !PeekCurrentSubgoal(out RouteSubgoal subgoal))
+>>>>>>> theirs
             return false;
 
         if (!target.isEnabled || !target.CanInteract(gameObject))
             return false;
 
         IKeyItem keyItem = target as IKeyItem;
+<<<<<<< ours
         return keyItem != null && DoorController.KeyIdsMatch(subgoal.requiredKeyId, keyItem.GetKeyId());
     }
 
     private bool IsInventoryReadyForTopSubgoal(NpcRouteCoordinator.RouteSubgoal subgoal, out DoorController controller)
+=======
+        return keyItem != null && keyItem.GetKeyId() == subgoal.requiredKeyId;
+    }
+
+    private bool IsInventoryReadyForTopSubgoal(RouteSubgoal subgoal, out DoorController controller)
+>>>>>>> theirs
     {
         controller = subgoal.blockedDoor != null ? subgoal.blockedDoor.GetDoorController() : null;
         if (controller == null)
@@ -3876,6 +4318,7 @@ private void HandleRestingState()
         return HasMatchingInventoryKey(controller);
     }
 
+<<<<<<< ours
     private bool TryResumeLockedDoorMission()
     {
         if (!routeCoordinator.TryPeekTopSubgoal(out _))
@@ -3892,6 +4335,11 @@ private void HandleRestingState()
     private bool TryProcessTopSubgoal()
     {
         if (!routeCoordinator.TryPeekTopSubgoal(out NpcRouteCoordinator.RouteSubgoal subgoal))
+=======
+    private bool TryProcessTopSubgoal()
+    {
+        if (!PeekCurrentSubgoal(out RouteSubgoal subgoal))
+>>>>>>> theirs
             return false;
 
         currentNeedType = subgoal.originatingNeedType;
@@ -3899,12 +4347,18 @@ private void HandleRestingState()
 
         if (subgoal.blockedDoor == null || string.IsNullOrWhiteSpace(subgoal.requiredKeyId))
         {
+<<<<<<< ours
             routeCoordinator.PopTopSubgoal("invalid top subgoal data");
             return TryResumeParentGoalAfterSubgoal();
+=======
+            PopCurrentSubgoal("invalid top subgoal data", out RouteSubgoal poppedSubgoal);
+            return TryResumeParentGoalAfterSubgoal(poppedSubgoal.originalDestination);
+>>>>>>> theirs
         }
 
         if (!subgoal.blockedDoor.isEnabled || !subgoal.blockedDoor.CanInteract(gameObject))
         {
+<<<<<<< ours
             routeCoordinator.PopTopSubgoal("door no longer interactable");
             return TryResumeParentGoalAfterSubgoal();
         }
@@ -3914,6 +4368,17 @@ private void HandleRestingState()
         {
             routeCoordinator.PopTopSubgoal("top subgoal resolved");
             return TryResumeParentGoalAfterSubgoal();
+=======
+            PopCurrentSubgoal("door no longer interactable", out RouteSubgoal poppedSubgoal);
+            return TryResumeParentGoalAfterSubgoal(poppedSubgoal.originalDestination);
+        }
+
+        DoorController controller = subgoal.blockedDoor.GetDoorController();
+        if (IsTopSubgoalResolved(subgoal, controller))
+        {
+            PopCurrentSubgoal("top subgoal resolved", out RouteSubgoal poppedSubgoal);
+            return TryResumeParentGoalAfterSubgoal(poppedSubgoal.originalDestination);
+>>>>>>> theirs
         }
 
         if (!IsInventoryReadyForTopSubgoal(subgoal, out controller))
@@ -3930,18 +4395,30 @@ private void HandleRestingState()
 
             if (currentTarget == null)
             {
+<<<<<<< ours
                 routeCoordinator.PopTopSubgoal("no reachable matching key found");
                 return TryResumeParentGoalAfterSubgoal();
+=======
+                PopCurrentSubgoal("no reachable matching key found", out RouteSubgoal poppedSubgoal);
+                return TryResumeParentGoalAfterSubgoal(poppedSubgoal.originalDestination);
+>>>>>>> theirs
             }
 
             return true;
         }
 
+<<<<<<< ours
+=======
+        pendingDoorTarget = subgoal.blockedDoor;
+        pendingDoorDestination = subgoal.blockedDestination;
+        hasPendingDoorDestination = true;
+>>>>>>> theirs
         hasExplorePoint = false;
         hasIdlePoint = false;
         if (currentState == AIState.IdleWander)
             ChangeState(AIState.Explore);
 
+<<<<<<< ours
         QueueDoorHandling(subgoal.blockedDoor, subgoal.blockedDestination, "resume-subgoal");
         DebugMovement($"Resuming subgoal for door={subgoal.blockedDoor.name}, depth={routeCoordinator.SubgoalCount}");
         return true;
@@ -3950,12 +4427,26 @@ private void HandleRestingState()
     private bool TryResumeParentGoalAfterSubgoal()
     {
         if (routeCoordinator.TryPeekTopSubgoal(out NpcRouteCoordinator.RouteSubgoal parentSubgoal))
+=======
+        DebugMovement($"Resuming subgoal for door={subgoal.blockedDoor.name}, depth={routeSubgoalStack.Count}");
+        return true;
+    }
+
+    private bool TryResumeParentGoalAfterSubgoal(Vector3? fallbackDestination)
+    {
+        if (PeekCurrentSubgoal(out RouteSubgoal parentSubgoal))
+>>>>>>> theirs
         {
             DebugMovement($"Returning to parent subgoal for door={parentSubgoal.blockedDoor?.name}");
             return TryProcessTopSubgoal();
         }
 
+<<<<<<< ours
         if (TryGetCurrentRouteObjective(out Vector3 destination))
+=======
+        if (TryGetCurrentRouteObjective(out Vector3 destination) ||
+            TryUseFallbackDestination(fallbackDestination, out destination))
+>>>>>>> theirs
         {
             if (IsPathReachable(destination) || TryHandleDoorForDestination(destination))
             {
@@ -3974,6 +4465,21 @@ private void HandleRestingState()
         return false;
     }
 
+<<<<<<< ours
+=======
+    private bool TryUseFallbackDestination(Vector3? fallbackDestination, out Vector3 destination)
+    {
+        if (!fallbackDestination.HasValue)
+        {
+            destination = transform.position;
+            return false;
+        }
+
+        destination = fallbackDestination.Value;
+        return true;
+    }
+
+>>>>>>> theirs
     private bool TryGetCurrentRouteObjective(out Vector3 destination)
     {
         if (currentState == AIState.MoveToTarget && currentTarget != null)
@@ -4052,7 +4558,11 @@ private void HandleRestingState()
         currentComfortZoneTarget = null;
         hasExplorePoint = false;
         hasIdlePoint = false;
+<<<<<<< ours
         if (routeCoordinator.TryPeekTopSubgoal(out NpcRouteCoordinator.RouteSubgoal topSubgoal))
+=======
+        if (PeekCurrentSubgoal(out RouteSubgoal topSubgoal))
+>>>>>>> theirs
         {
             currentNeedType = topSubgoal.originatingNeedType;
             currentNeedActionIsUrgentDriven = topSubgoal.originatedFromUrgentNeed;
@@ -4073,14 +4583,22 @@ private void HandleRestingState()
             if (isVisibleKey)
             {
                 Narrate("I can see the key I need. Going to get it.", "key-retrieval-visible");
+<<<<<<< ours
                 if (routeCoordinator.SubgoalCount > 0)
+=======
+                if (routeSubgoalStack.Count > 0)
+>>>>>>> theirs
                     DebugMovement("Subgoal key targeted from visible key.");
                 ChangeState(AIState.MoveToTarget);
             }
             else
             {
                 Narrate("I remember seeing a key that could open that door.", "key-retrieval-remembered");
+<<<<<<< ours
                 if (routeCoordinator.SubgoalCount > 0)
+=======
+                if (routeSubgoalStack.Count > 0)
+>>>>>>> theirs
                     DebugMovement("Subgoal key targeted from memory.");
                 ChangeState(AIState.MoveToRememberedTarget);
             }
