@@ -195,6 +195,14 @@ public class SimpleNPCBrain : MonoBehaviour
     [SerializeField] private float invariantCheckInterval = 1f;
     [SerializeField] private bool logSetupValidation = true;
 
+    [Header("AI Debug View")]
+    [SerializeField] private bool enablePeriodicAISummary = true;
+    [SerializeField] private float aiSummaryInterval = 2f;
+    [SerializeField] private bool verboseDecisionTracing = false;
+    [SerializeField, TextArea(2, 4)] private string latestAIThought;
+    [SerializeField, TextArea(2, 5)] private string latestAISummary;
+    [SerializeField] private string lastDecisionReason;
+
     private readonly List<RoomArea> overlappingRooms = new List<RoomArea>();
     private RoomArea[] knownRooms;
     private readonly NpcPerceptionService perceptionService = new NpcPerceptionService();
@@ -245,12 +253,15 @@ public class SimpleNPCBrain : MonoBehaviour
     private float lastMatchingLockedDoorKeyNarrationTime = -999f;
     private float invariantCheckTimer = 0f;
     private float lastInvariantWarningTime = -999f;
+    private float aiSummaryTimer = 0f;
     private float handItemReadyToUseTime = 0f;
     private Interactable activePreparedHandUseItem;
     private Interactable trackedHandItem;
     private float trackedHandItemSinceTime = 0f;
     private Interactable pendingPostUsePocketItem;
     private float pendingPostUsePocketTime = -1f;
+    private int lastVisibleInteractableCount = -1;
+    private int lastVisibleComfortRoomCount = -1;
     private const float InvariantWarningCooldown = 2f;
 
     private void Start()
@@ -293,9 +304,11 @@ public class SimpleNPCBrain : MonoBehaviour
         opportunisticCheckTimer = Random.Range(0f, opportunisticCheckInterval);
         downtimeActivityCheckTimer = Random.Range(0f, Mathf.Max(0.2f, downtimeActivityCheckInterval));
         invariantCheckTimer = Random.Range(0f, Mathf.Max(0.2f, invariantCheckInterval));
+        aiSummaryTimer = Random.Range(0f, Mathf.Max(0.5f, aiSummaryInterval));
         ValidateRuntimeSetup();
         
         Narrate("What a beautiful day! Let's go for a wander 😊.", "state-idle-start");
+        LogStateDecision("Initialized in idle wander with startup pause to establish room/need context.", "state-startup-idle", 0f);
     }
 
 private void Update()
@@ -322,7 +335,13 @@ private void Update()
 
     if (needsManager.HasUrgentNeed(out NeedType mostUrgentNeed))
     {
+        NeedType previousNeed = currentNeedType;
         bool needChanged = mostUrgentNeed != currentNeedType;
+        LogNeedDecision(
+            $"Urgent need detected: {mostUrgentNeed}",
+            $"CurrentState={currentState}, Room={GetRoomDebugLabel()}, CanInterrupt={CanInterruptCurrentActionForUrgentNeed()}",
+            "urgent-need-" + mostUrgentNeed,
+            0.75f);
 
         // Do not replace the active need while currently resting.
         if (!(currentState == AIState.Resting && currentRestInteractable != null))
@@ -334,11 +353,16 @@ private void Update()
 
         if (needChanged && IsGoalExecutionState(currentState) && currentState != AIState.Resting && CanInterruptCurrentActionForUrgentNeed())
         {
+            LogNeedDecision(
+                $"Priority switch requested: {previousNeed} -> {mostUrgentNeed}",
+                $"Current action can be interrupted while in {currentState}",
+                "urgent-priority-switch-" + mostUrgentNeed,
+                0.25f);
             Narrate(Pick(
                 "Something else is more urgent now. I need to switch priorities.",
                 "Hold on... another need just got worse. Changing course."
             ), "need-switch-priority");
-            RestartNeedSearch();
+            RestartNeedSearch("A different urgent need became dominant and interrupted the current action.");
             return;
         }
 
@@ -346,23 +370,33 @@ private void Update()
         {
             if (IsGoalExecutionState(currentState) && currentState != AIState.Resting && CanInterruptCurrentActionForUrgentNeed())
             {
+                LogNeedDecision(
+                    $"Urgent need satisfied during action: {currentNeedType}",
+                    $"Interrupting {currentState} because the active need is no longer urgent.",
+                    "need-satisfied-during-action-" + currentNeedType,
+                    0.5f);
                 Narrate(Pick(
                     "Okay, that's better.",
                     "Much better. I can ease off now."
                 ), "need-satisfied-in-action");
-                AbortCurrentNeedAction();
+                AbortCurrentNeedAction("The urgent need became satisfied while executing the current action.");
                 return;
             }
         }
         else if (currentState == AIState.IdleWander)
         {
-            ChangeState(AIState.Explore);
+            ChangeState(AIState.Explore, $"Need {currentNeedType} is urgent and idle wandering should yield to need-driven exploration.");
         }
     }
     else if (currentNeedActionIsUrgentDriven && IsGoalExecutionState(currentState) && currentState != AIState.Resting && routeCoordinator.SubgoalCount == 0)
     {
+        LogNeedDecision(
+            "Urgent action cleared",
+            "No urgent need remains and there is no door/key subgoal keeping the mission alive.",
+            "urgent-cleared-return-idle",
+            0.5f);
         Narrate("I feel okay again. Back to wandering.", "return-to-idle-no-urgent");
-        AbortCurrentNeedAction();
+        AbortCurrentNeedAction("No urgent need remains, so the current need action is being abandoned.");
         return;
     }
     else if (currentState == AIState.IdleWander)
@@ -417,26 +451,35 @@ private void Update()
             break;
     }
 
+    EmitPeriodicAISummary();
     HandleHandItemPresentation();
 }
 
     private bool IsCurrentAreaLit()
     {
-        if (currentRoom != null)
-            return currentRoom.IsLit();
-
-        if (worldArea != null)
-            return worldArea.IsDaytime();
-
-        return false;
+        return IsComfortSatisfiedWithoutLogging();
     }
 
     private bool IsNeedCurrentlySatisfied(NeedType needType)
     {
         if (needType == NeedType.Comfort)
-            return IsCurrentAreaLit();
+        {
+            bool comfortSatisfied = IsCurrentAreaLit();
+            LogNeedDecision(
+                $"Comfort check: {(comfortSatisfied ? "satisfied" : "unsatisfied")}",
+                $"CurrentRoom={GetRoomDebugLabel()}, CurrentRoomLit={(currentRoom != null && currentRoom.IsLit())}, OutsideLit={IsOutsideAreaLit()}",
+                "comfort-check-" + comfortSatisfied,
+                1f);
+            return comfortSatisfied;
+        }
 
-        return !needsManager.IsNeedUrgent(needType);
+        bool satisfied = !needsManager.IsNeedUrgent(needType);
+        LogNeedDecision(
+            $"{needType} check: {(satisfied ? "satisfied" : "still urgent")}",
+            $"Value={GetNeedValue(needType):0.0}, Band={GetNeedUrgencyBandName(needType)}",
+            "need-check-" + needType + "-" + satisfied,
+            1f);
+        return satisfied;
     }
 
     private bool HasUrgentNeed()
@@ -568,7 +611,7 @@ private void Update()
         if (currentNeedActionIsUrgentDriven && IsNeedCurrentlySatisfied(currentNeedType))
         {
             Narrate("Okay, that's better.", "explore-need-satisfied");
-            AbortCurrentNeedAction();
+            AbortCurrentNeedAction("Exploration stopped because the active urgent need is now satisfied.");
             return;
         }
 
@@ -578,7 +621,7 @@ private void Update()
             if (inventoryUse == InventoryUseAttempt.Used)
             {
                 Narrate("I have something for this. I'll use it.", "inventory-use-hunger");
-                AbortCurrentNeedAction();
+                AbortCurrentNeedAction("Exploration stopped because an inventory item already satisfied hunger.");
                 return;
             }
 
@@ -704,6 +747,11 @@ private void Update()
     private bool TryPickExplorePoint()
     {
         bool allowDoorBlockedExplore = currentNeedActionIsUrgentDriven && HasUrgentNeed();
+        LogNavigationDecision(
+            "Explore point search started",
+            $"Need={currentNeedType}, AllowDoorBlockedExplore={allowDoorBlockedExplore}, Radius={exploreRadius:0.0}",
+            "explore-point-search",
+            0.75f);
 
         for (int i = 0; i < 16; i++)
         {
@@ -724,6 +772,11 @@ private void Update()
                 hasExplorePoint = true;
                 exploreTimer = 0f;
                 currentExploreDoorRouteAttempts = 0;
+                LogNavigationDecision(
+                    "Explore point selected",
+                    $"Point={qualifiedPoint}, PathStatus=Complete",
+                    "explore-point-selected",
+                    0.1f);
                 return true;
             }
 
@@ -738,9 +791,19 @@ private void Update()
             exploreTimer = 0f;
             currentExploreDoorRouteAttempts = 0;
             QueueDoorHandling(blockingDoor, qualifiedPoint, "explore-beyond-door");
+            LogNavigationDecision(
+                "Explore point selected behind door",
+                $"Point={qualifiedPoint}, BlockingDoor={blockingDoor.name}, Need remains urgent.",
+                "explore-point-door-selected",
+                0.1f);
             return true;
         }
 
+        LogNavigationDecision(
+            "Explore point selection failed",
+            $"No reachable explore point was found within radius {exploreRadius:0.0}. AllowDoorBlockedExplore={allowDoorBlockedExplore}",
+            "explore-point-failed",
+            0.5f);
         return false;
     }
 
@@ -750,6 +813,11 @@ private void Update()
 
         bool currentRoomLit = currentRoom != null && currentRoom.IsLit();
         bool outsideLit = IsOutsideAreaLit();
+        LogNeedDecision(
+            "Idle wander candidate search started",
+            $"CurrentRoom={GetRoomDebugLabel()}, CurrentRoomLit={currentRoomLit}, OutsideLit={outsideLit}",
+            "idle-search-start",
+            0.75f);
 
         if (currentRoomLit)
         {
@@ -778,10 +846,26 @@ private void Update()
             Vector3 chosen = candidatePoints[Random.Range(0, candidatePoints.Count)];
             currentIdlePoint = chosen;
             hasIdlePoint = true;
+            bool stayingInCurrentRoom = currentRoom != null && currentRoom.ContainsPoint(chosen);
+            LogNavigationDecision(
+                "Idle wander point selected",
+                stayingInCurrentRoom
+                    ? $"Point={chosen}, constrained to current comfort room {GetRoomDebugLabel()}."
+                    : $"Point={chosen}, selected from visible comfort/outside candidates.",
+                "idle-point-selected",
+                0.1f);
             return true;
         }
 
-        return TryPickLocalIdlePoint();
+        bool pickedLocalPoint = TryPickLocalIdlePoint();
+        LogNavigationDecision(
+            pickedLocalPoint ? "Idle wander fallback selected" : "Idle wander fallback failed",
+            pickedLocalPoint
+                ? $"Point={currentIdlePoint}, using local fallback because no room-bound candidate was available."
+                : "No reachable local idle point was available.",
+            "idle-fallback-" + pickedLocalPoint,
+            0.5f);
+        return pickedLocalPoint;
     }
 
     private void TryAddRoomIdleCandidates(RoomArea room, List<Vector3> candidates, int attempts)
@@ -899,6 +983,8 @@ private void Update()
             knownRooms = FindObjectsByType<RoomArea>(FindObjectsSortMode.None);
         }
 
+        int visibleComfortCount = 0;
+
         for (int i = 0; i < knownRooms.Length; i++)
         {
             RoomArea room = knownRooms[i];
@@ -911,13 +997,34 @@ private void Update()
             if (!CanSeePoint(roomPoint))
                 continue;
 
+            if (room.IsLit())
+                visibleComfortCount++;
+
             RememberComfortZone(room, roomPoint, room.IsLit());
+        }
+
+        if (visibleComfortCount != lastVisibleComfortRoomCount)
+        {
+            lastVisibleComfortRoomCount = visibleComfortCount;
+            LogPerceptionDecision(
+                $"Visible comfort rooms changed: {visibleComfortCount}",
+                $"CurrentRoom={GetRoomDebugLabel()}",
+                "visible-comfort-count-" + visibleComfortCount,
+                0.1f);
         }
     }
 
     private void RememberComfortZone(RoomArea room, Vector3 position, bool wasLit)
     {
         NpcMemoryService.ComfortMemoryWriteResult writeResult = memoryService.RememberComfortZone(rememberedComfortZones, room, position, wasLit, Time.time);
+        if (writeResult != NpcMemoryService.ComfortMemoryWriteResult.None)
+        {
+            LogMemoryDecision(
+                $"Comfort memory update: {room.name}",
+                $"WriteResult={writeResult}, WasLit={wasLit}, Position={position}",
+                "comfort-memory-write-" + room.GetInstanceID() + "-" + writeResult,
+                0.5f);
+        }
         if (writeResult == NpcMemoryService.ComfortMemoryWriteResult.UpdatedLightingChanged)
         {
             Narrate(wasLit
@@ -939,7 +1046,14 @@ private void Update()
     private bool TryMoveToVisibleComfortZone(float maxDistance = Mathf.Infinity)
     {
         if (!TryFindBestVisibleComfortRoom(maxDistance, out RoomArea bestRoom, out _))
+        {
+            LogNeedDecision(
+                "Visible comfort zone rejected",
+                $"No lit room was visible within {maxDistance:0.0} units.",
+                "comfort-visible-none",
+                0.5f);
             return false;
+        }
 
         Vector3 bestPoint = bestRoom.GetRoomCenterPoint();
         bool wasLit = bestRoom.IsLit();
@@ -947,10 +1061,20 @@ private void Update()
         if (!IsPathReachable(bestPoint) && !TryHandleDoorForDestination(bestPoint))
         {
             RememberLocation(bestPoint);
+            LogNavigationDecision(
+                $"Visible comfort zone unreachable: {bestRoom.name}",
+                $"Point={bestPoint}. No direct path and no usable door route.",
+                "comfort-visible-unreachable-" + bestRoom.GetInstanceID(),
+                0.5f);
             return false;
         }
 
         Narrate("There's a lit area over there. That should help.", "perception-visible-comfort-target");
+        LogNeedDecision(
+            $"Comfort target selected: {bestRoom.name}",
+            $"Visible lit room chosen at {bestPoint}.",
+            "comfort-visible-target-" + bestRoom.GetInstanceID(),
+            0.1f);
 
         RememberComfortZone(bestRoom, bestPoint, wasLit);
         currentComfortZoneTarget = new RememberedComfortZone(bestRoom, bestPoint, Time.time, wasLit);
@@ -960,22 +1084,39 @@ private void Update()
         hasExplorePoint = false;
         hasIdlePoint = false;
         agent.ResetPath();
-        ChangeState(AIState.MoveToRememberedTarget);
+        ChangeState(AIState.MoveToRememberedTarget, $"Visible lit room {bestRoom.name} was selected as the current comfort destination.");
         return true;
     }
 
     private bool TryMoveToRememberedComfortZone()
     {
         if (!memoryService.TryFindBestRememberedComfortZone(rememberedComfortZones, transform.position, true, out RememberedComfortZone bestZone))
+        {
+            LogMemoryDecision(
+                "Remembered comfort zone rejected",
+                "No remembered lit comfort zone is currently available.",
+                "comfort-memory-none",
+                0.5f);
             return false;
+        }
 
         if (!IsPathReachable(bestZone.lastKnownPosition) && !TryHandleDoorForDestination(bestZone.lastKnownPosition))
         {
             RememberLocation(bestZone.lastKnownPosition);
+            LogNavigationDecision(
+                $"Remembered comfort zone unreachable: {bestZone.room?.name ?? "UnknownRoom"}",
+                $"Point={bestZone.lastKnownPosition}. No direct path and no usable door route.",
+                "comfort-memory-unreachable-" + (bestZone.room != null ? bestZone.room.GetInstanceID().ToString() : "unknown"),
+                0.5f);
             return false;
         }
 
         Narrate("I remember a lit place. I'll head there.", "recall-comfort-known-lit");
+        LogMemoryDecision(
+            $"Remembered comfort target selected: {bestZone.room?.name ?? "UnknownRoom"}",
+            $"Heading to remembered lit position {bestZone.lastKnownPosition}.",
+            "comfort-memory-selected-" + (bestZone.room != null ? bestZone.room.GetInstanceID().ToString() : "unknown"),
+            0.1f);
 
         currentComfortZoneTarget = bestZone;
         currentMemoryTarget = null;
@@ -983,22 +1124,39 @@ private void Update()
         hasExplorePoint = false;
         hasIdlePoint = false;
         agent.ResetPath();
-        ChangeState(AIState.MoveToRememberedTarget);
+        ChangeState(AIState.MoveToRememberedTarget, $"Remembered lit room {bestZone.room?.name ?? "UnknownRoom"} was selected as the current comfort destination.");
         return true;
     }
 
     private bool TryMoveToRememberedPotentialComfortZone()
     {
         if (!memoryService.TryFindBestRememberedComfortZone(rememberedComfortZones, transform.position, false, out RememberedComfortZone bestZone))
+        {
+            LogMemoryDecision(
+                "Potential comfort zone rejected",
+                "No remembered comfort-like area is available to test.",
+                "comfort-potential-none",
+                0.5f);
             return false;
+        }
 
         if (!IsPathReachable(bestZone.lastKnownPosition) && !TryHandleDoorForDestination(bestZone.lastKnownPosition))
         {
             RememberLocation(bestZone.lastKnownPosition);
+            LogNavigationDecision(
+                $"Potential comfort zone unreachable: {bestZone.room?.name ?? "UnknownRoom"}",
+                $"Point={bestZone.lastKnownPosition}. No direct path and no usable door route.",
+                "comfort-potential-unreachable-" + (bestZone.room != null ? bestZone.room.GetInstanceID().ToString() : "unknown"),
+                0.5f);
             return false;
         }
 
         Narrate("I've been near a place that might help. I'll try it again.", "recall-comfort-potential");
+        LogMemoryDecision(
+            $"Potential comfort target selected: {bestZone.room?.name ?? "UnknownRoom"}",
+            $"Trying remembered position {bestZone.lastKnownPosition} even though last known lighting was uncertain.",
+            "comfort-potential-selected-" + (bestZone.room != null ? bestZone.room.GetInstanceID().ToString() : "unknown"),
+            0.1f);
 
         currentComfortZoneTarget = bestZone;
         currentMemoryTarget = null;
@@ -1006,7 +1164,7 @@ private void Update()
         hasExplorePoint = false;
         hasIdlePoint = false;
         agent.ResetPath();
-        ChangeState(AIState.MoveToRememberedTarget);
+        ChangeState(AIState.MoveToRememberedTarget, $"Potential comfort room {bestZone.room?.name ?? "UnknownRoom"} was selected for verification.");
         return true;
     }
 
@@ -1100,6 +1258,15 @@ private void Update()
     private void PassiveObserveVisibleInteractables()
     {
         List<Interactable> visibleInteractables = perceptionService.GetVisibleInteractables(transform, transform.forward);
+        if (visibleInteractables.Count != lastVisibleInteractableCount)
+        {
+            lastVisibleInteractableCount = visibleInteractables.Count;
+            LogPerceptionDecision(
+                $"Visible interactables changed: {visibleInteractables.Count}",
+                $"Room={GetRoomDebugLabel()}",
+                "visible-interactable-count-" + visibleInteractables.Count,
+                0.1f);
+        }
 
         for (int i = 0; i < visibleInteractables.Count; i++)
         {
@@ -1116,16 +1283,35 @@ private void Update()
         if (!memoryService.TryRememberObservedInteractable(memory, interactable, gameObject, Time.time, out NpcMemoryService.ObservedInteractableMemoryResult result))
             return;
 
+        LogMemoryDecision(
+            $"Observed interactable remembered: {interactable.name}",
+            $"Need={result.needType}, WriteResult={result.writeResult}",
+            "remember-observed-" + interactable.GetInstanceID(),
+            0.5f);
         NarrateInteractableMemoryWrite(interactable, result.writeResult);
     }
 
     private bool TryStartDowntimeActivity()
     {
         if (HasUrgentNeed())
+        {
+            LogNeedDecision(
+                "Downtime activity rejected",
+                "An urgent need is active, so downtime activities are disabled.",
+                "downtime-reject-urgent",
+                0.75f);
             return false;
+        }
 
         if (currentNeedActionIsUrgentDriven)
+        {
+            LogNeedDecision(
+                "Downtime activity rejected",
+                "The NPC is still resolving an urgent-driven action.",
+                "downtime-reject-urgent-action",
+                0.75f);
             return false;
+        }
 
         downtimeActivityCheckTimer -= Time.deltaTime;
         if (downtimeActivityCheckTimer > 0f)
@@ -1136,7 +1322,17 @@ private void Update()
         if (TryAcquireVisibleActivityTarget(downtimeActivitySearchRadius))
             return true;
 
-        return TryUseRememberedActivityTarget(downtimeActivitySearchRadius);
+        bool usedRememberedActivity = TryUseRememberedActivityTarget(downtimeActivitySearchRadius);
+        if (!usedRememberedActivity)
+        {
+            LogPerceptionDecision(
+                "Downtime activity rejected",
+                $"No visible or remembered activity target was found within {downtimeActivitySearchRadius:0.0} units.",
+                "downtime-reject-none",
+                0.75f);
+        }
+
+        return usedRememberedActivity;
     }
 
     private bool TryAcquireVisibleActivityTarget(float maxDistance)
@@ -1177,6 +1373,11 @@ private void Update()
             return false;
 
         Narrate("That looks fun for a quick break.", "activity-visible-target");
+        LogPerceptionDecision(
+            $"Activity target selected: {bestTarget.name}",
+            $"Visible downtime activity chosen at distance {bestDistance:0.0}.",
+            "activity-visible-target-" + bestTarget.GetInstanceID(),
+            0.1f);
         return true;
     }
 
@@ -1189,6 +1390,11 @@ private void Update()
             return false;
 
         Narrate("I remember something fun nearby.", "activity-remembered-target");
+        LogMemoryDecision(
+            $"Remembered activity target selected: {bestMemory.interactable.name}",
+            $"Distance to remembered position={Vector3.Distance(transform.position, bestMemory.lastKnownPosition):0.0}.",
+            "activity-memory-target-" + bestMemory.interactable.GetInstanceID(),
+            0.1f);
         return true;
     }
 
@@ -1206,17 +1412,33 @@ private void Update()
         {
             RememberLocation(targetPosition);
             ClearActiveTargets();
+            LogNavigationDecision(
+                $"Downtime target unreachable: {interactable.name}",
+                $"TargetPosition={targetPosition}. No direct path or valid door route.",
+                "downtime-target-unreachable-" + interactable.GetInstanceID(),
+                0.5f);
             return false;
         }
 
-        ChangeState(remembered != null ? AIState.MoveToRememberedTarget : AIState.MoveToTarget);
+        ChangeState(
+            remembered != null ? AIState.MoveToRememberedTarget : AIState.MoveToTarget,
+            remembered != null
+                ? $"Heading toward remembered downtime activity {interactable.name}."
+                : $"Heading toward visible downtime activity {interactable.name}.");
         return true;
     }
 
     private bool TryAcquireVisibleTarget(NeedType needType, float maxDistance = Mathf.Infinity)
     {
         if (!TryFindBestVisibleTarget(needType, maxDistance, out Interactable bestTarget, out _))
+        {
+            LogPerceptionDecision(
+                $"Visible target rejected for {needType}",
+                $"No visible interactable matched the need within {maxDistance:0.0} units.",
+                "visible-target-none-" + needType,
+                0.5f);
             return false;
+        }
 
         Narrate("I see something that could help.", "perception-visible-interactable");
         RememberInteractable(bestTarget, needType);
@@ -1239,17 +1461,34 @@ private void Update()
         {
             RememberLocation(targetPosition);
             ClearActiveTargets();
+            LogNavigationDecision(
+                $"Visible target unreachable: {bestTarget.name}",
+                $"TargetPosition={targetPosition}. No direct path or valid door route.",
+                "visible-target-unreachable-" + bestTarget.GetInstanceID(),
+                0.5f);
             return false;
         }
 
-        ChangeState(AIState.MoveToTarget);
+        LogPerceptionDecision(
+            $"Target selected: {bestTarget.name}",
+            $"Need={needType}, TargetPosition={targetPosition}",
+            "visible-target-selected-" + bestTarget.GetInstanceID(),
+            0.1f);
+        ChangeState(AIState.MoveToTarget, $"Visible target {bestTarget.name} was selected for need {needType}.");
         return true;
     }
 
     private bool TryUseRememberedTarget(NeedType needType, float maxDistance = Mathf.Infinity)
     {
         if (!memoryService.TryFindBestRememberedNeedTarget(memory, needType, gameObject, transform.position, maxDistance, out RememberedInteractable bestMemory))
+        {
+            LogMemoryDecision(
+                $"Remembered target rejected for {needType}",
+                $"No remembered interactable matched the need within {maxDistance:0.0} units.",
+                "remembered-target-none-" + needType,
+                0.5f);
             return false;
+        }
 
         Narrate(Pick(
             "I remember something that could help.",
@@ -1268,10 +1507,20 @@ private void Update()
         {
             RememberLocation(bestMemory.lastKnownPosition);
             ClearActiveTargets();
+            LogNavigationDecision(
+                $"Remembered target unreachable: {bestMemory.interactable.name}",
+                $"TargetPosition={bestMemory.lastKnownPosition}. No direct path or valid door route.",
+                "remembered-target-unreachable-" + bestMemory.interactable.GetInstanceID(),
+                0.5f);
             return false;
         }
 
-        ChangeState(AIState.MoveToRememberedTarget);
+        LogMemoryDecision(
+            $"Remembered target selected: {bestMemory.interactable.name}",
+            $"Need={needType}, LastKnownPosition={bestMemory.lastKnownPosition}",
+            "remembered-target-selected-" + bestMemory.interactable.GetInstanceID(),
+            0.1f);
+        ChangeState(AIState.MoveToRememberedTarget, $"Remembered target {bestMemory.interactable.name} was selected for need {needType}.");
         return true;
     }
 
@@ -1283,21 +1532,21 @@ private void Update()
         if (currentNeedActionIsUrgentDriven && !HasUrgentNeed())
         {
             Narrate("I don't need this anymore.", "move-target-no-urgent");
-            AbortCurrentNeedAction();
+            AbortCurrentNeedAction("Movement to target stopped because no urgent need remains.");
             return;
         }
 
         if (currentNeedActionIsUrgentDriven && IsNeedCurrentlySatisfied(currentNeedType))
         {
             Narrate("Already feeling better. I'll stop here.", "move-target-need-satisfied");
-            AbortCurrentNeedAction();
+            AbortCurrentNeedAction("Movement to target stopped because the active need is already satisfied.");
             return;
         }
 
         if (currentTarget == null)
         {
             Narrate("I lost the target. I'll search again.", "move-target-lost");
-            HandleNeedActionFailure();
+            HandleNeedActionFailure("Current target became null while moving toward it.");
             return;
         }
 
@@ -1312,14 +1561,19 @@ private void Update()
             RememberLocation(targetPosition);
             LogMovementFailure("CurrentTarget", targetPosition, routeStep.failureKind, routeStep.recoveryResult);
             Narrate("Something is blocking this route. I'll search for another path.", "move-target-stalled-fallback");
-            HandleNeedActionFailure();
+            HandleNeedActionFailure($"Movement toward {currentTarget.name} failed with {routeStep.failureKind}.");
             return;
         }
 
         if (routeStep.arrived)
         {
             ClearMovementGoal();
-            ChangeState(AIState.InteractWithTarget);
+            LogNavigationDecision(
+                $"Arrived at target: {currentTarget.name}",
+                "Movement completed and interaction can begin.",
+                "arrived-current-target-" + currentTarget.GetInstanceID(),
+                0.1f);
+            ChangeState(AIState.InteractWithTarget, $"Reached target {currentTarget.name} and can now interact.");
         }
     }
 
@@ -1331,14 +1585,14 @@ private void Update()
         if (currentNeedActionIsUrgentDriven && !HasUrgentNeed())
         {
             Narrate("I'm okay now. No need to keep chasing this.", "move-remembered-no-urgent");
-            AbortCurrentNeedAction();
+            AbortCurrentNeedAction("Remembered-target pursuit stopped because no urgent need remains.");
             return;
         }
 
         if (currentNeedActionIsUrgentDriven && IsNeedCurrentlySatisfied(currentNeedType))
         {
             Narrate("That did the trick. I'll calm down.", "move-remembered-need-satisfied");
-            AbortCurrentNeedAction();
+            AbortCurrentNeedAction("Remembered-target pursuit stopped because the active need is already satisfied.");
             return;
         }
 
@@ -1348,7 +1602,7 @@ private void Update()
             {
                 Narrate("That place is gone... I'll keep searching.", "move-remembered-comfort-missing-room");
                 currentComfortZoneTarget = null;
-                HandleNeedActionFailure();
+                HandleNeedActionFailure("Remembered comfort zone no longer has a valid room.");
                 return;
             }
 
@@ -1363,7 +1617,7 @@ private void Update()
                 LogMovementFailure("RememberedComfortZone", currentComfortZoneTarget.lastKnownPosition, comfortRouteStep.failureKind, comfortRouteStep.recoveryResult);
                 Narrate("I can't reach that lit area from here. I'll find another option.", "move-remembered-comfort-stalled-fallback");
                 currentComfortZoneTarget = null;
-                HandleNeedActionFailure();
+                HandleNeedActionFailure($"Remembered comfort zone path failed with {comfortRouteStep.failureKind}.");
                 return;
             }
 
@@ -1373,13 +1627,13 @@ private void Update()
                 if (IsNeedCurrentlySatisfied(NeedType.Comfort))
                 {
                     Narrate("Much better.", "move-remembered-comfort-solved");
-                    AbortCurrentNeedAction();
+                    AbortCurrentNeedAction("Comfort became satisfied on arrival at remembered comfort zone.");
                 }
                 else
                 {
                     Narrate("Still not enough comfort here. I need another option.", "move-remembered-comfort-fallback");
                     currentComfortZoneTarget = null;
-                    HandleNeedActionFailure();
+                    HandleNeedActionFailure("Arrived at remembered comfort zone but comfort was still not satisfied.");
                 }
             }
 
@@ -1391,7 +1645,7 @@ private void Update()
             Narrate("That lead went cold. I'll look for something else.", "move-remembered-invalid");
             currentMemoryTarget = null;
             currentTarget = null;
-            HandleNeedActionFailure();
+            HandleNeedActionFailure("Remembered interactable target became invalid.");
             return;
         }
 
@@ -1416,7 +1670,7 @@ private void Update()
             Narrate("This route is blocked. I'll try a different lead.", "move-remembered-target-stalled-fallback");
             currentMemoryTarget = null;
             currentTarget = null;
-            HandleNeedActionFailure();
+            HandleNeedActionFailure($"Remembered target path failed with {rememberedRouteStep.failureKind}.");
             return;
         }
 
@@ -1426,7 +1680,7 @@ private void Update()
             if (currentTarget != null && currentTarget.CanInteract(gameObject) && CanSeeInteractable(currentTarget))
             {
                 Narrate("There it is.", "move-remembered-found-target");
-                ChangeState(AIState.MoveToTarget);
+                ChangeState(AIState.MoveToTarget, $"Remembered target {currentTarget.name} became visible and can now be approached directly.");
                 return;
             }
 
@@ -1434,7 +1688,7 @@ private void Update()
             ForgetRememberedInteractable(currentMemoryTarget);
             currentMemoryTarget = null;
             currentTarget = null;
-            HandleNeedActionFailure();
+            HandleNeedActionFailure("Arrived at remembered location but the target was not present.");
         }
     }
 
@@ -1446,14 +1700,14 @@ private void Update()
         if (currentNeedActionIsUrgentDriven && !HasUrgentNeed())
         {
             Narrate("Never mind, I don't need this right now.", "interact-no-urgent");
-            AbortCurrentNeedAction();
+            AbortCurrentNeedAction("Interaction was cancelled because no urgent need remains.");
             return;
         }
 
         if (currentTarget == null)
         {
             Narrate("No target to use... I'll search again.", "interact-missing-target");
-            HandleNeedActionFailure();
+            HandleNeedActionFailure("Interaction started without a valid current target.");
             return;
         }
 
@@ -1481,7 +1735,7 @@ private void Update()
                     }
 
                     Narrate("I'll spend a bit of time here.", "activity-start");
-                    ChangeState(AIState.PerformingActivity);
+                    ChangeState(AIState.PerformingActivity, $"Interaction with {currentTarget.name} started a downtime activity session.");
                     return;
                 }
             }
@@ -1530,7 +1784,7 @@ private void Update()
                         }
 
                         Narrate("I'll rest here for a bit.", "rest-session-begin");
-                        ChangeState(AIState.Resting);
+                        ChangeState(AIState.Resting, $"Interaction with {currentTarget.name} started a resting session.");
                         return;
                     }
                 }
@@ -1559,16 +1813,16 @@ private void Update()
                 "That solved it.",
                 "I feel okay again."
             ), "need-satisfied-after-interact");
-            ChangeState(AIState.IdleWander);
+            ChangeState(AIState.IdleWander, "Interaction satisfied the active urgent need.");
         }
         else if (HasUrgentNeed())
         {
             Narrate("Still need more. Keep looking.", "interact-still-urgent");
-            ChangeState(AIState.Explore);
+            ChangeState(AIState.Explore, "Interaction completed but at least one urgent need is still active.");
         }
         else
         {
-            ChangeState(AIState.IdleWander);
+            ChangeState(AIState.IdleWander, "Interaction completed and no urgent need remains.");
         }
     }
 
@@ -1576,6 +1830,11 @@ private void Update()
     {
         if (!pickupable.CanPickUp(gameObject))
         {
+            LogInventoryDecision(
+                $"Pickup rejected: {currentTarget?.name ?? "Unknown"}",
+                "CanPickUp returned false for the NPC.",
+                "pickup-reject-cannot-" + (currentTarget != null ? currentTarget.GetInstanceID().ToString() : "unknown"),
+                0.5f);
             DebugPickup("Pickup rejected by CanPickUp().");
             return false;
         }
@@ -1583,6 +1842,7 @@ private void Update()
         Interactable item = pickupable as Interactable;
         if (item == null)
         {
+            LogInventoryDecision("Pickup rejected", "Target did not implement Interactable.", "pickup-reject-non-interactable", 0.5f);
             DebugPickup("Pickup target is not an Interactable.");
             return false;
         }
@@ -1592,10 +1852,20 @@ private void Update()
             if (npcInventory.TryAddItem(item))
             {
                 Narrate("I'll take that for later.", "pickup-store");
+                LogInventoryDecision(
+                    $"Pickup stored: {item.name}",
+                    $"InventoryCount={npcInventory.Count}, MaxSlots={npcInventory.maxSlots}",
+                    "pickup-store-" + item.GetInstanceID(),
+                    0.1f);
                 DebugPickup("Pickup succeeded and stored for later: " + item.name);
                 return true;
             }
 
+            LogInventoryDecision(
+                $"Pickup failed: {item.name}",
+                "Inventory had space but TryAddItem returned false.",
+                "pickup-store-failed-" + item.GetInstanceID(),
+                0.5f);
             DebugPickup("Inventory had space but TryAddItem() failed for: " + item.name);
             return false;
         }
@@ -1603,6 +1873,7 @@ private void Update()
         Interactable leastValuable = npcInventory.GetLeastValuableItem();
         if (leastValuable == null)
         {
+            LogInventoryDecision("Pickup rejected", "Inventory reported full but no least valuable item was available to swap.", "pickup-reject-no-swap", 0.5f);
             DebugPickup("Inventory reported full but no least valuable item was found.");
             return false;
         }
@@ -1610,6 +1881,7 @@ private void Update()
         IPickupable leastPickupable = leastValuable as IPickupable;
         if (leastPickupable == null)
         {
+            LogInventoryDecision("Pickup rejected", $"Inventory item {leastValuable.name} is not pickupable and cannot be swapped.", "pickup-reject-invalid-swap", 0.5f);
             DebugPickup("Least valuable carried item is not IPickupable.");
             return false;
         }
@@ -1617,11 +1889,21 @@ private void Update()
         if (pickupable.GetItemValue() > leastPickupable.GetItemValue())
         {
             Narrate("This is better than what I'm carrying. I'll make room.", "pickup-swap");
+            LogInventoryDecision(
+                $"Pickup swap chosen: {item.name}",
+                $"Dropping {leastValuable.name} because {item.name} has higher value ({pickupable.GetItemValue():0.0} > {leastPickupable.GetItemValue():0.0}).",
+                "pickup-swap-" + item.GetInstanceID(),
+                0.1f);
             npcInventory.DropItem(leastValuable);
 
             if (!npcInventory.TryAddItem(item))
             {
                 Debug.LogWarning(gameObject.name + ": dropped inventory item but failed to pick up replacement.");
+                LogInventoryDecision(
+                    $"Pickup swap failed: {item.name}",
+                    $"Dropped {leastValuable.name} but replacement could not be added.",
+                    "pickup-swap-failed-" + item.GetInstanceID(),
+                    0.5f);
                 DebugPickup("Swap pickup failed after dropping an item.");
                 return false;
             }
@@ -1630,6 +1912,11 @@ private void Update()
             return true;
         }
 
+        LogInventoryDecision(
+            $"Pickup ignored: {item.name}",
+            $"Carried item {leastValuable.name} is equal or better value ({leastPickupable.GetItemValue():0.0} >= {pickupable.GetItemValue():0.0}).",
+            "pickup-ignore-value-" + item.GetInstanceID(),
+            0.5f);
         DebugPickup("Pickup declined because carried items were equal or better value.");
         return false;
     }
@@ -1642,7 +1929,7 @@ private void HandleRestingState()
     if (currentRestInteractable == null)
     {
         Narrate("I can't rest here anymore. I'll look elsewhere.", "rest-missing-interactable");
-        HandleNeedActionFailure();
+        HandleNeedActionFailure("Resting session lost its interactable target.");
         return;
     }
 
@@ -1650,7 +1937,7 @@ private void HandleRestingState()
     {
         Narrate("This resting spot is no longer available.", "rest-interactable-unavailable");
         StopRestingSession();
-        HandleNeedActionFailure();
+        HandleNeedActionFailure("Resting interactable became unavailable.");
         return;
     }
 
@@ -1712,9 +1999,9 @@ private void HandleRestingState()
     hasIdlePoint = false;
 
     if (currentNeedActionIsUrgentDriven && HasUrgentNeed())
-        ChangeState(AIState.Explore);
+        ChangeState(AIState.Explore, "Resting ended and an urgent need is still active.");
     else
-        ChangeState(AIState.IdleWander);
+        ChangeState(AIState.IdleWander, "Resting ended and no urgent need remains.");
 }
 
     private void HandlePerformingActivityState()
@@ -1740,7 +2027,7 @@ private void HandleRestingState()
         {
             Narrate("I need to handle something urgent first.", "activity-interrupted-urgent");
             FinishActivitySession(true);
-            RestartNeedSearch();
+            RestartNeedSearch("Downtime activity was interrupted because an urgent need became active.");
             return;
         }
 
@@ -1758,7 +2045,7 @@ private void HandleRestingState()
 
         Narrate("That was enough downtime. Back to wandering.", "activity-complete");
         FinishActivitySession(true);
-        ChangeState(AIState.IdleWander);
+        ChangeState(AIState.IdleWander, "Downtime activity completed without any urgent interruption.");
     }
 
     private void UpdateObservationZoneLookBehavior()
@@ -1797,7 +2084,14 @@ private void HandleRestingState()
     private InventoryUseAttempt TryUseInventoryItemForNeed(NeedType needType)
     {
         if (npcInventory == null || !npcInventory.HasItemForNeed(needType))
+        {
+            LogInventoryDecision(
+                $"Inventory check: no usable {needType} item",
+                "Inventory is missing or contains no item that satisfies the current need.",
+                "inventory-need-none-" + needType,
+                0.75f);
             return InventoryUseAttempt.None;
+        }
 
         Interactable handItem = npcInventory.GetHandItem();
         INeedSatisfier handSatisfier = handItem as INeedSatisfier;
@@ -1806,11 +2100,30 @@ private void HandleRestingState()
         if (handSatisfier != null && handSatisfier.GetNeedType() == needType)
         {
             if (!IsPreparedHandItemReady(handItem))
+            {
+                LogInventoryDecision(
+                    $"Inventory item waiting in hand: {handItem.name}",
+                    $"Need={needType}. Item is in hand but still in the ready-delay window.",
+                    "inventory-need-wait-hand-" + handItem.GetInstanceID(),
+                    0.25f);
                 return InventoryUseAttempt.WaitingForHandReady;
+            }
 
             if (!handItem.CanInteract(gameObject))
+            {
+                LogInventoryDecision(
+                    $"Inventory item rejected in hand: {handItem.name}",
+                    "Item matches the need but CanInteract returned false.",
+                    "inventory-need-hand-cannot-" + handItem.GetInstanceID(),
+                    0.5f);
                 return InventoryUseAttempt.None;
+            }
 
+            LogInventoryDecision(
+                $"Using inventory item from hand: {handItem.name}",
+                $"Need={needType}. Item is already prepared in hand.",
+                "inventory-need-use-hand-" + handItem.GetInstanceID(),
+                0.1f);
             handItem.Interact(gameObject);
             SchedulePostUsePocketingIfNeeded(handItem);
             return InventoryUseAttempt.Used;
@@ -1819,7 +2132,14 @@ private void HandleRestingState()
         // Otherwise fetch best item from inventory.
         Interactable bestItem = npcInventory.GetBestItemForNeed(needType);
         if (bestItem == null)
+        {
+            LogInventoryDecision(
+                $"Inventory search failed for {needType}",
+                "HasItemForNeed was true but GetBestItemForNeed returned null.",
+                "inventory-need-best-null-" + needType,
+                0.5f);
             return InventoryUseAttempt.None;
+        }
 
         bool readyNow = TryPrepareItemInHand(bestItem);
 
@@ -1827,16 +2147,40 @@ private void HandleRestingState()
         if (!readyNow)
         {
             if (npcInventory.GetHandItem() == bestItem)
+            {
+                LogInventoryDecision(
+                    $"Preparing inventory item: {bestItem.name}",
+                    $"Moved toward hand for need {needType}; waiting for ready-delay window.",
+                    "inventory-prepare-" + bestItem.GetInstanceID(),
+                    0.25f);
                 return InventoryUseAttempt.WaitingForHandReady;
+            }
 
+            LogInventoryDecision(
+                $"Inventory item preparation failed: {bestItem.name}",
+                $"Need={needType}. Item could not be prepared in hand this frame.",
+                "inventory-prepare-failed-" + bestItem.GetInstanceID(),
+                0.5f);
             return InventoryUseAttempt.None;
         }
 
         // Safety: now it should be in hand and ready.
         Interactable preparedHandItem = npcInventory.GetHandItem();
         if (!IsPreparedHandItemReady(preparedHandItem) || !preparedHandItem.CanInteract(gameObject))
+        {
+            LogInventoryDecision(
+                $"Prepared inventory item rejected: {preparedHandItem?.name ?? "null"}",
+                "Prepared item was not ready or could not interact when use was attempted.",
+                "inventory-prepared-rejected-" + (preparedHandItem != null ? preparedHandItem.GetInstanceID().ToString() : "null"),
+                0.5f);
             return InventoryUseAttempt.None;
+        }
 
+        LogInventoryDecision(
+            $"Using prepared inventory item: {preparedHandItem.name}",
+            $"Need={needType}. Item was prepared from inventory and is now being consumed/used.",
+            "inventory-use-prepared-" + preparedHandItem.GetInstanceID(),
+            0.1f);
         preparedHandItem.Interact(gameObject);
         SchedulePostUsePocketingIfNeeded(preparedHandItem);
         return InventoryUseAttempt.Used;
@@ -1961,9 +2305,13 @@ private void HandleRestingState()
         Debug.LogWarning($"{name}: {message}");
     }
 
-    private void AbortCurrentNeedAction()
+    private void AbortCurrentNeedAction(string reason = null)
     {
+        string abortReason = string.IsNullOrWhiteSpace(reason)
+            ? "Current need action is being aborted and control is returning to idle wander."
+            : reason;
         DebugAbort("AbortCurrentNeedAction");
+        LogStateDecision($"Abort current need action | Reason: {abortReason}", "abort-current-need-action", 0.1f);
         ClearAllSubgoals("aborted current need action");
 
         StopRestingSession();
@@ -1979,11 +2327,15 @@ private void HandleRestingState()
         hasExplorePoint = false;
         hasIdlePoint = false;
         agent.ResetPath();
-        ChangeState(AIState.IdleWander);
+        ChangeState(AIState.IdleWander, abortReason);
     }
 
-    private void RestartNeedSearch()
+    private void RestartNeedSearch(string reason = null)
     {
+        string restartReason = string.IsNullOrWhiteSpace(reason)
+            ? "Current action is being cleared so the NPC can search again for a valid need solution."
+            : reason;
+        LogStateDecision($"Restart need search | Reason: {restartReason}", "restart-need-search", 0.1f);
         ClearAllSubgoals("priority switch restart");
         StopRestingSession();
         FinishActivitySession(true);
@@ -1998,7 +2350,7 @@ private void HandleRestingState()
         hasExplorePoint = false;
         hasIdlePoint = false;
         agent.ResetPath();
-        ChangeState(AIState.Explore);
+        ChangeState(AIState.Explore, restartReason);
     }
 
     private void StopRestingSession()
@@ -2073,22 +2425,28 @@ private void HandleRestingState()
         return needMoveSpeed * needsManager.GetNeedMoveSpeedMultiplier(currentNeedType);
     }
 
-    private void HandleNeedActionFailure()
+    private void HandleNeedActionFailure(string reason = null)
     {
+        LogDecision(
+            "Need action failed",
+            string.IsNullOrWhiteSpace(reason) ? $"CurrentState={currentState}, Target={GetTargetDebugLabel()}" : reason,
+            NPCThoughtLogger.ThoughtCategory.Navigation,
+            "need-action-failed-" + currentState,
+            0.25f);
         ClearMovementGoal();
         ResetPendingDoorState();
         currentExploreDoorRouteAttempts = 0;
 
         if (currentNeedActionIsUrgentDriven || HasUrgentNeed())
         {
-            ChangeState(AIState.Explore);
+            ChangeState(AIState.Explore, "Action failure occurred while an urgent need remains active, so exploration resumes.");
             return;
         }
 
-        AbortCurrentNeedAction();
+        AbortCurrentNeedAction("Action failure occurred and there is no urgent need forcing continued pursuit.");
     }
 
-    private void ChangeState(AIState newState)
+    private void ChangeState(AIState newState, string reason = null)
     {
         if (currentState == newState)
             return;
@@ -2118,12 +2476,21 @@ private void HandleRestingState()
                 break;
         }
 
+        LogStateChange(previousState, currentState, reason);
         Narrate(GetStateTransitionThought(previousState, currentState), "state-change-" + previousState + "-" + currentState);
     }
 
     private void RememberInteractable(Interactable interactable, NeedType needType, bool isActivity = false, ActivityType activityType = ActivityType.Generic)
     {
         NpcMemoryService.MemoryWriteResult writeResult = memoryService.RememberInteractable(memory, interactable, needType, Time.time, isActivity, activityType);
+        if (interactable != null && writeResult != NpcMemoryService.MemoryWriteResult.None)
+        {
+            LogMemoryDecision(
+                $"Interactable memory update: {interactable.name}",
+                $"Need={needType}, IsActivity={isActivity}, ActivityType={activityType}, WriteResult={writeResult}",
+                "interactable-memory-write-" + interactable.GetInstanceID() + "-" + writeResult,
+                0.5f);
+        }
         NarrateInteractableMemoryWrite(interactable, writeResult);
     }
 
@@ -2161,6 +2528,14 @@ private void HandleRestingState()
     private void RememberLockedDoor(DoorInteractable door)
     {
         NpcMemoryService.LockedDoorMemoryWriteResult writeResult = memoryService.RememberLockedDoor(rememberedLockedDoors, door, Time.time);
+        if (door != null && writeResult != NpcMemoryService.LockedDoorMemoryWriteResult.None)
+        {
+            LogMemoryDecision(
+                $"Locked door remembered: {door.name}",
+                $"WriteResult={writeResult}",
+                "locked-door-memory-" + door.GetInstanceID() + "-" + writeResult,
+                0.5f);
+        }
         if (writeResult == NpcMemoryService.LockedDoorMemoryWriteResult.Added)
             Narrate("I can't open that. I'll remember it.", "memory-locked-door-" + door.GetInstanceID());
     }
@@ -2219,7 +2594,14 @@ private void HandleRestingState()
         }
 
         if (bestDoor == null)
+        {
+            LogNavigationDecision(
+                "Idle door check rejected",
+                $"No nearby closed door within {idleDoorSearchRadius:0.0} units was suitable for opening.",
+                "idle-door-none",
+                0.75f);
             return false;
+        }
 
         DoorController controller = bestDoor.GetDoorController();
         if (controller == null)
@@ -2227,6 +2609,12 @@ private void HandleRestingState()
 
         if (controller.IsOpen)
             return false;
+
+        LogNavigationDecision(
+            $"Idle door candidate: {bestDoor.name}",
+            $"Distance={bestDistance:0.0}, Locked={controller.IsLocked}",
+            "idle-door-candidate-" + bestDoor.GetInstanceID(),
+            0.25f);
 
         if (TryUnlockAndOpenDoorFromInventory(bestDoor))
         {
@@ -2249,15 +2637,34 @@ private void HandleRestingState()
         if (controller.IsOpen)
             return false;
 
+        LogNavigationDecision(
+            $"Door interaction attempt: {door.name}",
+            $"Locked={controller.IsLocked}, Open={controller.IsOpen}, CurrentTarget={GetTargetDebugLabel()}",
+            "door-interact-attempt-" + door.GetInstanceID(),
+            0.25f);
         door.Interact(gameObject);
 
         if (controller.IsOpen)
+        {
+            LogNavigationDecision(
+                $"Door opened: {door.name}",
+                "Door responded to a normal interaction without needing inventory.",
+                "door-opened-direct-" + door.GetInstanceID(),
+                0.1f);
             return true;
+        }
 
         if (npcInventory == null)
         {
             if (controller.IsLocked)
+            {
+                LogInventoryDecision(
+                    $"Door remained locked: {door.name}",
+                    "NPCInventory is missing, so no key lookup can be performed.",
+                    "door-locked-no-inventory-" + door.GetInstanceID(),
+                    0.5f);
                 RememberLockedDoor(door);
+            }
             return false;
         }
 
@@ -2265,14 +2672,33 @@ private void HandleRestingState()
         if (unlockAttempt == DoorUnlockAttempt.Unlocked)
         {
             door.Interact(gameObject);
+            LogNavigationDecision(
+                $"Door reopen after unlock: {door.name}",
+                $"OpenResult={controller.IsOpen}",
+                "door-open-after-unlock-" + door.GetInstanceID(),
+                0.1f);
             return controller.IsOpen;
         }
 
         if (unlockAttempt == DoorUnlockAttempt.WaitingForHandReady)
+        {
+            LogInventoryDecision(
+                $"Door unlock waiting: {door.name}",
+                "Matching key exists but is still being prepared in hand.",
+                "door-unlock-wait-" + door.GetInstanceID(),
+                0.25f);
             return false;
+        }
 
         if (controller.IsLocked)
+        {
+            LogNavigationDecision(
+                $"Door unlock failed: {door.name}",
+                "Matching key could not unlock the door or no usable key was ready.",
+                "door-unlock-failed-" + door.GetInstanceID(),
+                0.5f);
             RememberLockedDoor(door);
+        }
 
         return false;
     }
@@ -2287,29 +2713,64 @@ private void HandleRestingState()
             return DoorUnlockAttempt.Failed;
 
         if (!npcInventory.TryGetMatchingKey(controller.RequiredKeyId, out IKeyItem key))
+        {
+            LogInventoryDecision(
+                $"Inventory key check: no valid key found for {door.name}",
+                $"RequiredKeyId={controller.RequiredKeyId}",
+                "door-key-none-" + door.GetInstanceID(),
+                0.5f);
             return DoorUnlockAttempt.Failed;
+        }
 
         Interactable keyInteractable = key as Interactable;
+        LogInventoryDecision(
+            $"Inventory key check: found key for {door.name}",
+            $"Key={keyInteractable?.name ?? "UnknownKey"}, RequiredKeyId={controller.RequiredKeyId}",
+            "door-key-found-" + door.GetInstanceID(),
+            0.25f);
         bool waitingForHandReady;
         if (!TryPrepareKeyForDoorUse(keyInteractable, out waitingForHandReady))
         {
             if (waitingForHandReady)
                 return DoorUnlockAttempt.WaitingForHandReady;
+
+            LogInventoryDecision(
+                $"Key preparation failed for {door.name}",
+                $"Key={keyInteractable?.name ?? "UnknownKey"} could not be prepared in hand.",
+                "door-key-prep-failed-" + door.GetInstanceID(),
+                0.5f);
             return DoorUnlockAttempt.Failed;
         }
 
         IKeyItem heldKey = npcInventory.GetHandItem() as IKeyItem;
         if (heldKey == null)
+        {
+            LogInventoryDecision(
+                $"Door unlock failed: {door.name}",
+                "A matching key was expected in hand but no held key item was found.",
+                "door-key-missing-in-hand-" + door.GetInstanceID(),
+                0.5f);
             return DoorUnlockAttempt.Failed;
+        }
 
         bool unlocked = controller.TryUnlock(heldKey.GetKeyId());
         if (unlocked)
         {
             SchedulePostUsePocketingIfNeeded(npcInventory.GetHandItem());
             Narrate("Good thing I kept this key. That lock is open now.", "door-unlock-success");
+            LogNavigationDecision(
+                $"Door unlocked: {door.name}",
+                $"Key={(heldKey as Interactable)?.name ?? "HeldKey"}, RequiredKeyId={controller.RequiredKeyId}",
+                "door-unlocked-" + door.GetInstanceID(),
+                0.1f);
             return DoorUnlockAttempt.Unlocked;
         }
 
+        LogNavigationDecision(
+            $"Door unlock failed: {door.name}",
+            $"HeldKeyId={heldKey.GetKeyId()}, RequiredKeyId={controller.RequiredKeyId}",
+            "door-unlock-rejected-" + door.GetInstanceID(),
+            0.5f);
         return DoorUnlockAttempt.Failed;
     }
 
@@ -2327,6 +2788,11 @@ private void HandleRestingState()
                 if (activePreparedHandUseItem != keyInteractable)
                     MarkHandItemDrawnForUse(keyInteractable);
 
+                LogInventoryDecision(
+                    $"Key in hand but not ready: {keyInteractable.name}",
+                    "Waiting for the hand-use delay before unlocking the door.",
+                    "key-hand-not-ready-" + keyInteractable.GetInstanceID(),
+                    0.25f);
                 waitingForHandReady = true;
                 return false;
             }
@@ -2339,6 +2805,13 @@ private void HandleRestingState()
             if (npcInventory.GetHandItem() == keyInteractable && !IsPreparedHandItemReady(keyInteractable))
                 waitingForHandReady = true;
 
+            LogInventoryDecision(
+                $"Preparing key for use: {keyInteractable.name}",
+                waitingForHandReady
+                    ? "Key has been moved toward the hand and is waiting for the ready-delay."
+                    : "Key could not be moved into a usable hand state this frame.",
+                "prepare-key-use-" + keyInteractable.GetInstanceID(),
+                0.25f);
             return false;
         }
 
@@ -2356,12 +2829,24 @@ private void HandleRestingState()
             if (activePreparedHandUseItem != desiredItem)
                 MarkHandItemDrawnForUse(desiredItem);
 
+            LogInventoryDecision(
+                $"Item already in hand: {desiredItem.name}",
+                "Waiting for the hand-use delay before allowing use.",
+                "item-already-in-hand-" + desiredItem.GetInstanceID(),
+                0.25f);
             return IsPreparedHandItemReady(desiredItem);
         }
 
         // Still in a blocked/transition window.
         if (!IsHandItemReadyToUse())
+        {
+            LogInventoryDecision(
+                $"Item move to hand blocked: {desiredItem.name}",
+                "The hand slot is still in a cooldown/transition window.",
+                "item-hand-blocked-" + desiredItem.GetInstanceID(),
+                0.25f);
             return false;
+        }
 
         bool movedToHand = false;
 
@@ -2371,11 +2856,23 @@ private void HandleRestingState()
             movedToHand = npcInventory.TryMoveInventoryItemToHand(desiredItem) || npcInventory.TrySetHandItem(desiredItem);
 
         if (!movedToHand)
+        {
+            LogInventoryDecision(
+                $"Item move to hand failed: {desiredItem.name}",
+                "Inventory could not swap or move the desired item into the hand slot.",
+                "item-hand-move-failed-" + desiredItem.GetInstanceID(),
+                0.5f);
             return false;
+        }
 
         // Important: after moving it into hand, do NOT allow instant use.
         MarkHandItemDrawnForUse(desiredItem);
         CancelPendingPostUsePocketing(desiredItem);
+        LogInventoryDecision(
+            $"Item moved to hand: {desiredItem.name}",
+            "Item is now in hand and waiting for the ready-delay before it can be used.",
+            "item-hand-moved-" + desiredItem.GetInstanceID(),
+            0.1f);
         return false;
     }
     private void HandleHandItemPresentation()
@@ -2410,7 +2907,14 @@ private void HandleRestingState()
         if (Time.time - trackedHandItemSinceTime < Mathf.Max(0f, idleHandPocketDelay))
             return;
 
-        npcInventory.TryMoveHandItemToInventory();
+        if (npcInventory.TryMoveHandItemToInventory())
+        {
+            LogInventoryDecision(
+                $"Item pocketed from hand: {currentHandItem.name}",
+                "Idle hand presentation timer elapsed, so the held item was returned to inventory.",
+                "item-pocketed-idle-" + currentHandItem.GetInstanceID(),
+                0.1f);
+        }
     }
 
     private void SchedulePostUsePocketingIfNeeded(Interactable usedItem)
@@ -2446,6 +2950,14 @@ private void HandleRestingState()
         bool pocketed = npcInventory.TryMoveHandItemToInventory();
         if (pocketed || npcInventory.GetHandItem() != pendingPostUsePocketItem)
         {
+            if (pocketed && pendingPostUsePocketItem != null)
+            {
+                LogInventoryDecision(
+                    $"Post-use pocketed: {pendingPostUsePocketItem.name}",
+                    "Used item was returned to inventory after the visible hold delay.",
+                    "item-pocketed-post-use-" + pendingPostUsePocketItem.GetInstanceID(),
+                    0.1f);
+            }
             pendingPostUsePocketItem = null;
             pendingPostUsePocketTime = -1f;
             activePreparedHandUseItem = null;
@@ -2532,6 +3044,7 @@ private void HandleRestingState()
 
     private void ResolveCurrentRoom()
     {
+        RoomArea previousRoom = currentRoom;
         RoomArea containingRoom = null;
         float containingDistanceSqr = Mathf.Infinity;
         RoomArea fallbackRoom = null;
@@ -2567,6 +3080,15 @@ private void HandleRestingState()
         }
 
         currentRoom = containingRoom != null ? containingRoom : fallbackRoom;
+
+        if (currentRoom != previousRoom)
+        {
+            LogNeedDecision(
+                $"Room context changed: {GetRoomName(previousRoom)} -> {GetRoomName(currentRoom)}",
+                $"CurrentRoomLit={(currentRoom != null && currentRoom.IsLit())}, ComfortSatisfied={IsComfortSatisfiedWithoutLogging()}",
+                "room-change-" + GetRoomName(currentRoom),
+                0.1f);
+        }
     }
 
     private void OnDrawGizmosSelected()
@@ -2991,7 +3513,7 @@ private void HandleRestingState()
             Narrate("That key could help with that locked door.", "opportunity-key-matches-locked-door");
         }
 
-        ChangeState(AIState.MoveToTarget);
+        ChangeState(AIState.MoveToTarget, $"Opportunistic pickup target {currentTarget.name} was selected while no urgent need was active.");
         return true;
     }
 
@@ -3048,7 +3570,7 @@ private void HandleRestingState()
         }
 
         lastOpportunisticComfortLightTime = Time.time;
-        ChangeState(AIState.MoveToTarget);
+        ChangeState(AIState.MoveToTarget, $"Opportunistic comfort-light switch {bestSwitch.name} was selected to improve room lighting.");
         return true;
     }
 
@@ -3365,6 +3887,11 @@ private void HandleRestingState()
         if (stalledController == null || !stalledController.IsLocked || HasMatchingInventoryKey(stalledController))
             return false;
 
+        LogNavigationDecision(
+            $"Blocked route escalated to key search: {stalledDoor.name}",
+            $"RequiredKeyId={stalledController.RequiredKeyId}, Target={target}",
+            "route-key-escalation-" + stalledDoor.GetInstanceID(),
+            0.25f);
         return TryAcquireMatchingKeyForLockedDoor(stalledController.RequiredKeyId);
     }
 
@@ -3374,6 +3901,11 @@ private void HandleRestingState()
         MovementFailureKind failureKind,
         NpcRouteCoordinator.MovementRecoveryResult recoveryResult)
     {
+        LogNavigationDecision(
+            $"Movement failure: {contextTag}",
+            $"FailureKind={failureKind}, Target={target}, Trigger={recoveryResult.trigger}, Action={recoveryResult.action}, Path={recoveryResult.pathStatus}",
+            "movement-failure-" + contextTag + "-" + failureKind,
+            0.25f);
         DebugMovement(
             $"[{contextTag}] Route failure classified as {failureKind} @ {target} | trigger={recoveryResult.trigger} | action={recoveryResult.action} | path={recoveryResult.pathStatus}");
     }
@@ -3402,6 +3934,12 @@ private void HandleRestingState()
         if (controller == null)
             return false;
 
+        LogNavigationDecision(
+            $"Path blocked by door: {door.name}",
+            $"Destination={destination}, DoorOpen={controller.IsOpen}, DoorLocked={controller.IsLocked}, PendingTargetPreserved={hasPendingDoorDestination || currentTarget != null || currentMemoryTarget != null}",
+            "door-blocking-" + door.GetInstanceID(),
+            0.25f);
+
         if (controller.IsOpen)
         {
             if (routeCoordinator.TryPeekTopSubgoal(out NpcRouteCoordinator.RouteSubgoal topSubgoal) && topSubgoal.blockedDoor == door)
@@ -3416,6 +3954,11 @@ private void HandleRestingState()
             BeginMovementGoal(destination);
             agent.SetDestination(destination);
             ResetStallTimer();
+            LogNavigationDecision(
+                $"Door already open: {door.name}",
+                "Resuming movement directly to the preserved destination.",
+                "door-open-resume-" + door.GetInstanceID(),
+                0.1f);
             return true;
         }
 
@@ -3480,6 +4023,11 @@ private void HandleRestingState()
         if (!IsWithinPendingDoorInteractionRange(door, doorAnchor))
             return true;
 
+        LogNavigationDecision(
+            $"Door in interaction range: {door.name}",
+            $"Phase={pendingDoorRuntime.phase}, Locked={controller.IsLocked}, Open={controller.IsOpen}",
+            "door-in-range-" + door.GetInstanceID(),
+            0.25f);
         FaceTowardsPoint(doorAnchor);
 
         if (controller.IsLocked)
@@ -3492,6 +4040,11 @@ private void HandleRestingState()
             return true;
 
         pendingDoorRuntime.lastProgressTime = Time.time;
+        LogNavigationDecision(
+            $"Door interaction attempt: {pendingDoorTarget.name}",
+            $"Locked={controller.IsLocked}, Open={controller.IsOpen}, CooldownReady=true",
+            "pending-door-interact-" + pendingDoorTarget.GetInstanceID(),
+            0.1f);
         pendingDoorTarget.Interact(gameObject);
         lastDoorInteractTime = Time.time;
         MarkMovementProgress("pending-door-interact");
@@ -3812,14 +4365,14 @@ private void HandleRestingState()
 
             case AIState.MoveToTarget:
             case AIState.MoveToRememberedTarget:
-                HandleNeedActionFailure();
+                HandleNeedActionFailure("Pending door handling failed while pursuing a movement target.");
                 return;
 
             default:
                 if (HasUrgentNeed())
-                    ChangeState(AIState.Explore);
+                    ChangeState(AIState.Explore, "Pending door handling failed and an urgent need is still active.");
                 else
-                    ChangeState(AIState.IdleWander);
+                    ChangeState(AIState.IdleWander, "Pending door handling failed and no urgent need remains.");
                 break;
         }
     }
@@ -3842,11 +4395,13 @@ private void HandleRestingState()
 
     private void LogPendingDoorInfo(string message)
     {
-        Debug.Log($"{name}: {message}");
+        LogNavigationDecision(message, null, "pending-door-info-" + message, 0f);
     }
 
     private void LogPendingDoorWarning(string message)
     {
+        latestAIThought = message;
+        lastDecisionReason = message;
         Debug.LogWarning($"{name}: {message}");
     }
 
@@ -3861,7 +4416,13 @@ private void HandleRestingState()
         if (npcInventory == null)
             return false;
 
-        return npcInventory.TryGetMatchingKey(controller.RequiredKeyId, out _);
+        bool hasMatchingKey = npcInventory.TryGetMatchingKey(controller.RequiredKeyId, out IKeyItem matchingKey);
+        LogInventoryDecision(
+            $"Inventory key check: {(hasMatchingKey ? "usable key found" : "no usable key found")}",
+            $"RequiredKeyId={controller.RequiredKeyId}, Key={(matchingKey as Interactable)?.name ?? "None"}",
+            "inventory-key-check-" + controller.RequiredKeyId + "-" + hasMatchingKey,
+            0.25f);
+        return hasMatchingKey;
     }
 
     private void ClearAllSubgoals(string reason)
@@ -3911,17 +4472,24 @@ private void HandleRestingState()
         if (!routeCoordinator.TryPeekTopSubgoal(out NpcRouteCoordinator.RouteSubgoal subgoal))
             return false;
 
+        LogNavigationDecision(
+            $"Processing top subgoal for door: {subgoal.blockedDoor?.name ?? "MissingDoor"}",
+            $"RequiredKeyId={subgoal.requiredKeyId}, Depth={routeCoordinator.SubgoalCount}",
+            "subgoal-process-" + (subgoal.blockedDoor != null ? subgoal.blockedDoor.GetInstanceID().ToString() : "missing"),
+            0.25f);
         currentNeedType = subgoal.originatingNeedType;
         currentNeedActionIsUrgentDriven = subgoal.originatedFromUrgentNeed;
 
         if (subgoal.blockedDoor == null || string.IsNullOrWhiteSpace(subgoal.requiredKeyId))
         {
+            LogNavigationDecision("Subgoal discarded", "Top subgoal had invalid door or key data.", "subgoal-invalid", 0.1f);
             routeCoordinator.PopTopSubgoal("invalid top subgoal data");
             return TryResumeParentGoalAfterSubgoal();
         }
 
         if (!subgoal.blockedDoor.isEnabled || !subgoal.blockedDoor.CanInteract(gameObject))
         {
+            LogNavigationDecision($"Subgoal discarded: {subgoal.blockedDoor.name}", "Blocked door is no longer interactable.", "subgoal-door-invalid-" + subgoal.blockedDoor.GetInstanceID(), 0.1f);
             routeCoordinator.PopTopSubgoal("door no longer interactable");
             return TryResumeParentGoalAfterSubgoal();
         }
@@ -3929,6 +4497,7 @@ private void HandleRestingState()
         DoorController controller = subgoal.blockedDoor.GetDoorController();
         if (routeCoordinator.IsSubgoalResolved(subgoal, controller))
         {
+            LogNavigationDecision($"Subgoal resolved: {subgoal.blockedDoor.name}", "Door is already open or unlocked.", "subgoal-resolved-" + subgoal.blockedDoor.GetInstanceID(), 0.1f);
             routeCoordinator.PopTopSubgoal("top subgoal resolved");
             return TryResumeParentGoalAfterSubgoal();
         }
@@ -3961,7 +4530,7 @@ private void HandleRestingState()
         hasExplorePoint = false;
         hasIdlePoint = false;
         if (currentState == AIState.IdleWander)
-            ChangeState(AIState.Explore);
+            ChangeState(AIState.Explore, $"Locked-door subgoal for {subgoal.blockedDoor.name} requires proactive pathing.");
 
         QueueDoorHandling(subgoal.blockedDoor, subgoal.blockedDestination, "resume-subgoal");
         DebugMovement($"Resuming subgoal for door={subgoal.blockedDoor.name}, depth={routeCoordinator.SubgoalCount}");
@@ -3988,9 +4557,9 @@ private void HandleRestingState()
         }
 
         if (HasUrgentNeed())
-            ChangeState(AIState.Explore);
+            ChangeState(AIState.Explore, "Subgoal stack cleared but an urgent need still requires exploration.");
         else
-            ChangeState(AIState.IdleWander);
+            ChangeState(AIState.IdleWander, "Subgoal stack cleared and no urgent need remains.");
 
         return false;
     }
@@ -4042,14 +4611,29 @@ private void HandleRestingState()
         if (TryFindBestVisibleMatchingKey(requiredKeyId, out Interactable visibleKey))
         {
             RememberObservedInteractable(visibleKey);
+            LogPerceptionDecision(
+                $"Matching key spotted: {visibleKey.name}",
+                $"RequiredKeyId={requiredKeyId}. Using visible key before trying memory.",
+                "matching-key-visible-" + visibleKey.GetInstanceID(),
+                0.1f);
             return CommitMatchingKeyTarget(visibleKey, null, true);
         }
 
         if (TryFindBestRememberedMatchingKey(requiredKeyId, out RememberedInteractable rememberedKey))
         {
+            LogMemoryDecision(
+                $"Matching key recalled: {rememberedKey.interactable.name}",
+                $"RequiredKeyId={requiredKeyId}. Using remembered key location {rememberedKey.lastKnownPosition}.",
+                "matching-key-memory-" + rememberedKey.interactable.GetInstanceID(),
+                0.1f);
             return CommitMatchingKeyTarget(rememberedKey.interactable, rememberedKey, false);
         }
 
+        LogInventoryDecision(
+            $"Matching key search failed: {requiredKeyId}",
+            "No visible or remembered key matched the locked door requirement.",
+            "matching-key-none-" + requiredKeyId,
+            0.5f);
         return false;
     }
 
@@ -4096,14 +4680,14 @@ private void HandleRestingState()
                 Narrate("I can see the key I need. Going to get it.", "key-retrieval-visible");
                 if (routeCoordinator.SubgoalCount > 0)
                     DebugMovement("Subgoal key targeted from visible key.");
-                ChangeState(AIState.MoveToTarget);
+                ChangeState(AIState.MoveToTarget, $"Visible key {currentTarget.name} matches the locked door requirement.");
             }
             else
             {
                 Narrate("I remember seeing a key that could open that door.", "key-retrieval-remembered");
                 if (routeCoordinator.SubgoalCount > 0)
                     DebugMovement("Subgoal key targeted from memory.");
-                ChangeState(AIState.MoveToRememberedTarget);
+                ChangeState(AIState.MoveToRememberedTarget, $"Remembered key {currentTarget.name} matches the locked door requirement.");
             }
 
             return true;
@@ -4188,28 +4772,198 @@ private void HandleRestingState()
         return options[Random.Range(0, options.Length)];
     }
 
-    private void Narrate(
-        string message,
-        string eventKey = null,
-        NPCThoughtLogger.ThoughtCategory category = NPCThoughtLogger.ThoughtCategory.General)
+    private void EmitPeriodicAISummary()
     {
-        if (thoughtLogger == null || string.IsNullOrEmpty(message))
+        if (!enablePeriodicAISummary)
             return;
 
-        NeedsManager.NeedUrgencyBand band = needsManager != null
-            ? needsManager.GetNeedUrgencyBand(currentNeedType)
-            : NeedsManager.NeedUrgencyBand.Stable;
+        aiSummaryTimer -= Time.deltaTime;
+        if (aiSummaryTimer > 0f)
+            return;
 
-        float value = needsManager != null
-            ? needsManager.GetNeedValue(currentNeedType)
-            : 0f;
+        aiSummaryTimer = Mathf.Max(0.5f, aiSummaryInterval);
+
+        NeedType summaryNeed = currentNeedType;
+        if (needsManager != null && needsManager.HasUrgentNeed(out NeedType urgentNeed))
+            summaryNeed = urgentNeed;
+
+        string summary = $"AI summary | State={currentState} | Need={summaryNeed} {GetNeedValue(summaryNeed):0.0} ({GetNeedUrgencyBandName(summaryNeed)}) | Target={GetTargetDebugLabel()} | Room={GetRoomDebugLabel()} | Thought={lastDecisionReason}";
+        latestAISummary = summary;
+
+        if (thoughtLogger == null)
+            return;
+
+        thoughtLogger.Think(
+            gameObject.name,
+            currentState.ToString(),
+            summaryNeed.ToString(),
+            GetNeedValue(summaryNeed),
+            GetNeedUrgencyBandName(summaryNeed),
+            summary,
+            "ai-summary",
+            NPCThoughtLogger.ThoughtCategory.Summary,
+            0f,
+            true);
+    }
+
+    private void LogStateChange(AIState previousState, AIState newState, string reason)
+    {
+        LogDecision(
+            $"State change: {previousState} -> {newState}",
+            string.IsNullOrWhiteSpace(reason) ? "No explicit state-change reason was provided." : reason,
+            NPCThoughtLogger.ThoughtCategory.StateChange,
+            $"state-trace-{previousState}-{newState}",
+            0f);
+    }
+
+    private void LogStateDecision(string message, string eventKey, float cooldown = 0.5f)
+    {
+        LogDecision(message, null, NPCThoughtLogger.ThoughtCategory.StateChange, eventKey, cooldown);
+    }
+
+    private void LogNeedDecision(string label, string reason, string eventKey, float cooldown = 0.5f)
+    {
+        LogDecision(label, reason, NPCThoughtLogger.ThoughtCategory.NeedShift, eventKey, cooldown);
+    }
+
+    private void LogPerceptionDecision(string label, string reason, string eventKey, float cooldown = 0.5f)
+    {
+        LogDecision(label, reason, NPCThoughtLogger.ThoughtCategory.Perception, eventKey, cooldown);
+    }
+
+    private void LogNavigationDecision(string label, string reason, string eventKey, float cooldown = 0.5f)
+    {
+        LogDecision(label, reason, NPCThoughtLogger.ThoughtCategory.Navigation, eventKey, cooldown);
+    }
+
+    private void LogInteractionDecision(string label, string reason, string eventKey, float cooldown = 0.5f)
+    {
+        LogDecision(label, reason, NPCThoughtLogger.ThoughtCategory.Interaction, eventKey, cooldown);
+    }
+
+    private void LogInventoryDecision(string label, string reason, string eventKey, float cooldown = 0.5f)
+    {
+        LogDecision(label, reason, NPCThoughtLogger.ThoughtCategory.Inventory, eventKey, cooldown);
+    }
+
+    private void LogMemoryDecision(string label, string reason, string eventKey, float cooldown = 0.5f)
+    {
+        LogDecision(label, reason, NPCThoughtLogger.ThoughtCategory.Memory, eventKey, cooldown);
+    }
+
+    private void LogDecision(
+        string label,
+        string reason,
+        NPCThoughtLogger.ThoughtCategory category,
+        string eventKey,
+        float cooldown = 0.5f,
+        bool verboseOnly = false)
+    {
+        string message = string.IsNullOrWhiteSpace(reason)
+            ? label
+            : $"{label} | Reason: {reason}";
+
+        latestAIThought = message;
+        lastDecisionReason = message;
+
+        if (verboseOnly && !verboseDecisionTracing && !debugOpportunisticFlow)
+            return;
+
+        if (thoughtLogger == null)
+            return;
 
         thoughtLogger.Think(
             gameObject.name,
             currentState.ToString(),
             currentNeedType.ToString(),
-            value,
-            band.ToString(),
+            GetNeedValue(currentNeedType),
+            GetNeedUrgencyBandName(currentNeedType),
+            message,
+            eventKey,
+            category,
+            cooldown);
+    }
+
+    private float GetNeedValue(NeedType needType)
+    {
+        return needsManager != null ? needsManager.GetNeedValue(needType) : 0f;
+    }
+
+    private string GetNeedUrgencyBandName(NeedType needType)
+    {
+        return needsManager != null
+            ? needsManager.GetNeedUrgencyBand(needType).ToString()
+            : NeedsManager.NeedUrgencyBand.Stable.ToString();
+    }
+
+    private string GetTargetDebugLabel()
+    {
+        if (currentTarget != null)
+            return currentTarget.name;
+
+        if (currentMemoryTarget != null && currentMemoryTarget.interactable != null)
+            return currentMemoryTarget.interactable.name + " (remembered)";
+
+        if (currentComfortZoneTarget != null)
+            return (currentComfortZoneTarget.room != null ? currentComfortZoneTarget.room.name : "ComfortZone") + " (comfort)";
+
+        if (pendingDoorTarget != null)
+            return pendingDoorTarget.name + " (door)";
+
+        if (hasExplorePoint)
+            return "ExplorePoint";
+
+        if (hasIdlePoint)
+            return "IdlePoint";
+
+        return "None";
+    }
+
+    private string GetRoomDebugLabel()
+    {
+        if (currentRoom != null)
+            return $"{currentRoom.name} (Lit={currentRoom.IsLit()})";
+
+        return $"Outside/NoRoom (Lit={IsOutsideAreaLit()})";
+    }
+
+    private string GetRoomName(RoomArea room)
+    {
+        return room != null ? room.name : "NoRoom";
+    }
+
+    private bool IsComfortSatisfiedWithoutLogging()
+    {
+        if (currentRoom != null)
+            return currentRoom.IsLit();
+
+        if (worldArea != null)
+            return worldArea.IsDaytime();
+
+        return false;
+    }
+
+    private void Narrate(
+        string message,
+        string eventKey = null,
+        NPCThoughtLogger.ThoughtCategory category = NPCThoughtLogger.ThoughtCategory.General)
+    {
+        if (string.IsNullOrEmpty(message))
+            return;
+
+        latestAIThought = message;
+        if (string.IsNullOrWhiteSpace(lastDecisionReason))
+            lastDecisionReason = message;
+
+        if (thoughtLogger == null)
+            return;
+
+        thoughtLogger.Think(
+            gameObject.name,
+            currentState.ToString(),
+            currentNeedType.ToString(),
+            GetNeedValue(currentNeedType),
+            GetNeedUrgencyBandName(currentNeedType),
             message,
             eventKey,
             category
@@ -4221,7 +4975,13 @@ private void HandleRestingState()
         if (!debugOpportunisticFlow)
             return;
 
-        Debug.Log($"{name} | {reason} | urgentDriven={currentNeedActionIsUrgentDriven} | state={currentState} | need={currentNeedType}");
+        LogDecision(
+            $"Verbose abort trace: {reason}",
+            $"UrgentDriven={currentNeedActionIsUrgentDriven}, Target={GetTargetDebugLabel()}",
+            NPCThoughtLogger.ThoughtCategory.StateChange,
+            "verbose-abort-" + reason,
+            0.1f,
+            true);
     }
 
     private void DebugPickup(string reason)
@@ -4229,8 +4989,13 @@ private void HandleRestingState()
         if (!debugOpportunisticFlow)
             return;
 
-        string targetName = currentTarget != null ? currentTarget.name : "null";
-        Debug.Log($"{name} | Pickup | {reason} | target={targetName} | state={currentState} | need={currentNeedType} | urgentDriven={currentNeedActionIsUrgentDriven}");
+        LogDecision(
+            $"Verbose pickup trace: {reason}",
+            $"Target={GetTargetDebugLabel()}, UrgentDriven={currentNeedActionIsUrgentDriven}",
+            NPCThoughtLogger.ThoughtCategory.Inventory,
+            "verbose-pickup-" + reason,
+            0.1f,
+            true);
     }
 
     private void DebugFlow(string reason)
@@ -4238,13 +5003,22 @@ private void HandleRestingState()
         if (!debugOpportunisticFlow)
             return;
 
-        Debug.Log($"{name} | Flow | {reason} | state={currentState} | need={currentNeedType} | urgentDriven={currentNeedActionIsUrgentDriven}");
+        LogDecision(
+            $"Verbose flow trace: {reason}",
+            $"State={currentState}, Need={currentNeedType}, UrgentDriven={currentNeedActionIsUrgentDriven}",
+            NPCThoughtLogger.ThoughtCategory.Perception,
+            "verbose-flow-" + reason,
+            0.1f,
+            true);
     }
 
     private void OnValidate()
     {
         if (invariantCheckInterval < 0.2f)
             invariantCheckInterval = 0.2f;
+
+        if (aiSummaryInterval < 0.5f)
+            aiSummaryInterval = 0.5f;
 
         if (doorCheckDistance < 0.25f)
             doorCheckDistance = 0.25f;

@@ -1,104 +1,136 @@
-﻿using System.Collections.Generic;
+using System.Collections.Generic;
 using UnityEngine;
 
 public class NPCThoughtLogger : MonoBehaviour
 {
-	public enum ThoughtCategory
-	{
-		General,
-		StateChange,
-		NeedShift,
-		Memory,
-		Perception,
-		Interaction
-	}
+    public enum ThoughtCategory
+    {
+        General,
+        StateChange,
+        NeedShift,
+        Memory,
+        Perception,
+        Navigation,
+        Interaction,
+        Inventory,
+        Summary
+    }
 
-	[Header("Logging")]
-	[SerializeField] private bool enableThinkingLogs = true;
-	[SerializeField] private bool includeTimestamp = false;
-	[SerializeField] private float repeatedThoughtCooldown = 2.5f;
+    [Header("Logging")]
+    [SerializeField] private bool enableThinkingLogs = true;
+    [SerializeField] private bool includeTimestamp = false;
+    [SerializeField] private float repeatedThoughtCooldown = 1.5f;
 
-	[Header("Category Filters")]
-	[SerializeField] private bool logGeneral = true;
-	[SerializeField] private bool logStateChange = true;
-	[SerializeField] private bool logNeedShift = true;
-	[SerializeField] private bool logMemory = true;
-	[SerializeField] private bool logPerception = true;
-	[SerializeField] private bool logInteraction = true;
+    [Header("Category Filters")]
+    [SerializeField] private bool logGeneral = true;
+    [SerializeField] private bool logStateChange = true;
+    [SerializeField] private bool logNeedShift = true;
+    [SerializeField] private bool logMemory = true;
+    [SerializeField] private bool logPerception = true;
+    [SerializeField] private bool logNavigation = true;
+    [SerializeField] private bool logInteraction = true;
+    [SerializeField] private bool logInventory = true;
+    [SerializeField] private bool logSummary = true;
 
-	private readonly Dictionary<string, float> thoughtCooldowns = new Dictionary<string, float>();
+    [Header("Runtime View")]
+    [SerializeField, TextArea(2, 4)] private string lastThought;
+    [SerializeField, TextArea(2, 4)] private string lastSummary;
+    [SerializeField] private ThoughtCategory lastCategory = ThoughtCategory.General;
+    [SerializeField] private float lastThoughtTime = -999f;
 
-	public void Think(
-		string actorName,
-		string stateName,
-		string needName,
-		float needValue,
-		string urgencyBand,
-		string message,
-		string eventKey = null,
-		ThoughtCategory category = ThoughtCategory.General)
-	{
-		if (!enableThinkingLogs)
-			return;
+    private readonly Dictionary<string, float> thoughtCooldowns = new Dictionary<string, float>();
 
-		if (string.IsNullOrWhiteSpace(message))
-			return;
+    public void Think(
+        string actorName,
+        string stateName,
+        string needName,
+        float needValue,
+        string urgencyBand,
+        string message,
+        string eventKey = null,
+        ThoughtCategory category = ThoughtCategory.General,
+        float cooldownOverride = -1f,
+        bool bypassCooldown = false)
+    {
+        if (!enableThinkingLogs)
+            return;
 
-		if (!IsCategoryEnabled(category))
-			return;
+        if (string.IsNullOrWhiteSpace(message))
+            return;
 
-		string cooldownKey = string.IsNullOrWhiteSpace(eventKey)
-			? message
-			: eventKey;
+        if (!IsCategoryEnabled(category))
+            return;
 
-		float now = Time.time;
+        string cooldownKey = string.IsNullOrWhiteSpace(eventKey)
+            ? message
+            : eventKey;
 
-		if (thoughtCooldowns.TryGetValue(cooldownKey, out float nextAllowedTime) && now < nextAllowedTime)
-			return;
+        float now = Time.time;
+        float cooldown = cooldownOverride >= 0f
+            ? cooldownOverride
+            : Mathf.Max(0f, repeatedThoughtCooldown);
 
-		thoughtCooldowns[cooldownKey] = now + Mathf.Max(0f, repeatedThoughtCooldown);
+        if (!bypassCooldown &&
+            cooldown > 0f &&
+            thoughtCooldowns.TryGetValue(cooldownKey, out float nextAllowedTime) &&
+            now < nextAllowedTime)
+        {
+            return;
+        }
 
-		string safeActor = string.IsNullOrWhiteSpace(actorName) ? "NPC" : actorName;
-		string safeState = string.IsNullOrWhiteSpace(stateName) ? "UnknownState" : stateName;
-		string safeNeed = string.IsNullOrWhiteSpace(needName) ? "UnknownNeed" : needName;
-		string safeBand = string.IsNullOrWhiteSpace(urgencyBand) ? "UnknownBand" : urgencyBand;
+        if (!bypassCooldown && cooldown > 0f)
+            thoughtCooldowns[cooldownKey] = now + cooldown;
 
-		string header = "[" + safeActor +
-			" | " + safeState +
-			" | " + safeNeed + ": " + needValue.ToString("0.0") +
-			" (" + safeBand + ")" +
-			" | " + category + "]";
+        string safeActor = string.IsNullOrWhiteSpace(actorName) ? "NPC" : actorName;
+        string safeState = string.IsNullOrWhiteSpace(stateName) ? "UnknownState" : stateName;
+        string safeNeed = string.IsNullOrWhiteSpace(needName) ? "UnknownNeed" : needName;
+        string safeBand = string.IsNullOrWhiteSpace(urgencyBand) ? "UnknownBand" : urgencyBand;
 
-		if (includeTimestamp)
-		{
-			header = "[t=" + now.ToString("0.0") + "] " + header;
-		}
+        string header = $"[NPC: {safeActor}] [{category}] State={safeState} | Need={safeNeed} {needValue:0.0} ({safeBand})";
+        if (includeTimestamp)
+            header = $"[t={now:0.0}] {header}";
 
-		Debug.Log(header + " " + message, this);
-	}
+        lastCategory = category;
+        lastThoughtTime = now;
+        if (category == ThoughtCategory.Summary)
+            lastSummary = message;
+        else
+            lastThought = message;
 
-	private bool IsCategoryEnabled(ThoughtCategory category)
-	{
-		switch (category)
-		{
-		case ThoughtCategory.StateChange:
-			return logStateChange;
+        Debug.Log($"{header} | {message}", this);
+    }
 
-		case ThoughtCategory.NeedShift:
-			return logNeedShift;
+    private bool IsCategoryEnabled(ThoughtCategory category)
+    {
+        switch (category)
+        {
+            case ThoughtCategory.StateChange:
+                return logStateChange;
 
-		case ThoughtCategory.Memory:
-			return logMemory;
+            case ThoughtCategory.NeedShift:
+                return logNeedShift;
 
-		case ThoughtCategory.Perception:
-			return logPerception;
+            case ThoughtCategory.Memory:
+                return logMemory;
 
-		case ThoughtCategory.Interaction:
-			return logInteraction;
+            case ThoughtCategory.Perception:
+                return logPerception;
 
-		case ThoughtCategory.General:
-		default:
-			return logGeneral;
-		}
-	}
+            case ThoughtCategory.Navigation:
+                return logNavigation;
+
+            case ThoughtCategory.Interaction:
+                return logInteraction;
+
+            case ThoughtCategory.Inventory:
+                return logInventory;
+
+            case ThoughtCategory.Summary:
+                return logSummary;
+
+            case ThoughtCategory.General:
+            default:
+                return logGeneral;
+        }
+    }
 }
