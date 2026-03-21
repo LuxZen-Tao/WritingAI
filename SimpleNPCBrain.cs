@@ -217,14 +217,6 @@ public class SimpleNPCBrain : MonoBehaviour
     private int movementGoalRecoveryAttempts = 0;
     private int movementPathFailureCount = 0;
 
-    private Vector3 activeMovementGoalPosition;
-    private bool hasActiveMovementGoal = false;
-    private float movementGoalStartTime = 0f;
-    private float movementGoalBestDistance = Mathf.Infinity;
-    private float movementLastProgressTime = 0f;
-    private int movementGoalRecoveryAttempts = 0;
-    private int movementPathFailureCount = 0;
-
     private readonly Dictionary<NeedType, NeedsManager.NeedUrgencyBand> lastNeedBands = new Dictionary<NeedType, NeedsManager.NeedUrgencyBand>();
     private readonly Dictionary<NeedType, bool> lastNeedUrgentFlags = new Dictionary<NeedType, bool>();
     private float lastOpportunisticComfortLightTime = -999f;
@@ -2044,6 +2036,7 @@ private void HandleRestingState()
         StopRestingSession();
         FinishActivitySession(true);
         ResetStallTimer();
+        ClearMovementGoal();
         currentTarget = null;
         currentMemoryTarget = null;
         currentComfortZoneTarget = null;
@@ -2063,6 +2056,7 @@ private void HandleRestingState()
         StopRestingSession();
         FinishActivitySession(true);
         ResetStallTimer();
+        ClearMovementGoal();
         currentTarget = null;
         currentMemoryTarget = null;
         currentComfortZoneTarget = null;
@@ -2150,6 +2144,7 @@ private void HandleRestingState()
 
     private void HandleNeedActionFailure()
     {
+        ClearMovementGoal();
         pendingDoorTarget = null;
         hasPendingDoorDestination = false;
         currentExploreDoorRouteAttempts = 0;
@@ -3735,6 +3730,32 @@ private void HandleRestingState()
         return HasMatchingInventoryKey(controller);
     }
 
+    private bool TryResumeLockedDoorMission()
+    {
+        if (!PeekCurrentSubgoal(out RouteSubgoal topSubgoal))
+            return false;
+
+        bool poppedResolvedSubgoal = false;
+
+        while (true)
+        {
+            DoorController controller = topSubgoal.blockedDoor != null ? topSubgoal.blockedDoor.GetDoorController() : null;
+            if (!IsTopSubgoalResolved(topSubgoal, controller))
+                break;
+
+            PopCurrentSubgoal("resume-mission-resolved");
+            poppedResolvedSubgoal = true;
+
+            if (!PeekCurrentSubgoal(out topSubgoal))
+                break;
+        }
+
+        if (poppedResolvedSubgoal)
+            return TryResumeParentGoalAfterSubgoal();
+
+        return TryProcessTopSubgoal();
+    }
+
     private bool TryProcessTopSubgoal()
     {
         if (!PeekCurrentSubgoal(out RouteSubgoal subgoal))
@@ -3994,6 +4015,7 @@ private void HandleRestingState()
         if (currentActivityInteractable != null)
             currentActivityInteractable.EndActivity(gameObject);
 
+        ClearMovementGoal();
         currentActivityInteractable = null;
         currentActivityElapsed = 0f;
         currentActivityDuration = 0f;
