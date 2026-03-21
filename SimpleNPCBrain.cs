@@ -36,6 +36,24 @@ public class SimpleNPCBrain : MonoBehaviour
         public Vector3 recoveryPoint;
     }
 
+    private enum MovementFailureKind
+    {
+        None,
+        BlockedByDoor,
+        BlockedByObstacle,
+        BadChosenPoint,
+        NoProgressDeadlock
+    }
+
+    private struct MovementRouteStepResult
+    {
+        public bool arrived;
+        public bool failed;
+        public bool redirectedToDoor;
+        public MovementFailureKind failureKind;
+        public NpcRouteCoordinator.MovementRecoveryResult recoveryResult;
+    }
+
     public enum AIState
     {
         IdleWander,
@@ -90,6 +108,11 @@ public class SimpleNPCBrain : MonoBehaviour
     public float movementRecoveryUnstuckRadius = 1.0f;
     public float movementPointClearanceRadius = 0.35f;
     public int movementPathFailureLimit = 3;
+
+    [Header("Movement Point Quality")]
+    public float movementPointSampleDistance = 2f;
+    public float minimumMovementPointWallDistance = 0.2f;
+    public float minimumExploreMoveDistance = 1f;
 
     [Header("Door Probe")]
     public float doorCheckDistance = 1.75f;
@@ -455,7 +478,9 @@ private void Update()
 
     private void HandleIdleWander()
     {
-        ResetStallTimer();
+        if (HandlePendingDoorTarget())
+            return;
+
         agent.speed = idleMoveSpeed;
 
         if (TryStartDowntimeActivity())
@@ -468,6 +493,7 @@ private void Update()
             if (agent.hasPath)
                 agent.ResetPath();
 
+            ResetStallTimer();
             return;
         }
 
@@ -485,6 +511,7 @@ private void Update()
                 if (agent.hasPath)
                     agent.ResetPath();
 
+                ResetStallTimer();
                 return;
             }
 
@@ -495,22 +522,42 @@ private void Update()
             ), "idle-picked-point");
         }
 
-        agent.SetDestination(currentIdlePoint);
+        MovementRouteStepResult routeStep = ExecuteMovementRouteStep(currentIdlePoint, idleWanderStopDistance, "IdleWander");
+        if (routeStep.redirectedToDoor)
+            return;
 
-        if (!agent.pathPending && agent.remainingDistance <= idleWanderStopDistance)
+        if (routeStep.failed)
+        {
+            RememberLocation(currentIdlePoint);
+            LogMovementFailure("IdleWander", currentIdlePoint, routeStep.failureKind, routeStep.recoveryResult);
+            hasIdlePoint = false;
+            idlePauseTimer = 0.35f;
+
+            if (agent.hasPath)
+                agent.ResetPath();
+
+            ClearMovementGoal();
+            ResetStallTimer();
+            return;
+        }
+
+        if (routeStep.arrived)
         {
             if (agent.hasPath)
                 agent.ResetPath();
 
+            ClearMovementGoal();
             hasIdlePoint = false;
 
             if (TryHandleNearbyIdleDoor())
             {
                 idlePauseTimer = 0.25f;
+                ResetStallTimer();
                 return;
             }
 
             idlePauseTimer = idlePauseDuration;
+            ResetStallTimer();
         }
     }
 
@@ -616,16 +663,15 @@ private void Update()
             return;
         }
 
-        BeginMovementGoal(currentExplorePoint);
-        agent.SetDestination(currentExplorePoint);
         currentExploreDoorRouteAttempts = 0;
-
-        if (TryRedirectPartialPathToPendingDoor(currentExplorePoint, "ExplorePoint"))
+        MovementRouteStepResult routeStep = ExecuteMovementRouteStep(currentExplorePoint, exploreStopDistance, "ExplorePoint");
+        if (routeStep.redirectedToDoor)
             return;
 
-        if (TryRecoverMovementGoal(currentExplorePoint, "ExplorePoint"))
+        if (routeStep.failed)
         {
             RememberLocation(currentExplorePoint);
+            LogMovementFailure("ExplorePoint", currentExplorePoint, routeStep.failureKind, routeStep.recoveryResult);
             Narrate("I can't move through here. I'll try another route.", "explore-stalled-fallback");
             hasExplorePoint = false;
             exploreTimer = 0f;
@@ -634,7 +680,7 @@ private void Update()
             return;
         }
 
-        if (!agent.pathPending && agent.remainingDistance <= exploreStopDistance)
+        if (routeStep.arrived)
         {
             RememberLocation(currentExplorePoint);
             Narrate("Nothing useful here... moving on.", "explore-point-finished");
@@ -667,21 +713,12 @@ private void Update()
 
             Vector3 candidate = transform.position + randomOffset;
 
-            if (IsRecentlyVisited(candidate))
+            if (!TryGetQualifiedMovementPoint(candidate, minimumExploreMoveDistance, true, out Vector3 qualifiedPoint))
                 continue;
 
-            if (!NavMesh.SamplePosition(candidate, out NavMeshHit navHit, 2f, NavMesh.AllAreas))
-                continue;
-
-            if (IsRecentlyVisited(navHit.position))
-                continue;
-
-            if (!HasPointClearance(navHit.position))
-                continue;
-
-            if (IsPathReachable(navHit.position))
+            if (IsPathReachable(qualifiedPoint))
             {
-                currentExplorePoint = navHit.position;
+                currentExplorePoint = qualifiedPoint;
                 hasExplorePoint = true;
                 exploreTimer = 0f;
                 currentExploreDoorRouteAttempts = 0;
@@ -691,14 +728,14 @@ private void Update()
             if (!allowDoorBlockedExplore)
                 continue;
 
-            if (!IsExplorePointBlockedByDoor(navHit.position, out DoorInteractable blockingDoor))
+            if (!IsExplorePointBlockedByDoor(qualifiedPoint, out DoorInteractable blockingDoor))
                 continue;
 
-            currentExplorePoint = navHit.position;
+            currentExplorePoint = qualifiedPoint;
             hasExplorePoint = true;
             exploreTimer = 0f;
             currentExploreDoorRouteAttempts = 0;
-            QueueDoorHandling(blockingDoor, navHit.position);
+            QueueDoorHandling(blockingDoor, qualifiedPoint, "explore-beyond-door");
             return true;
         }
 
@@ -755,23 +792,16 @@ private void Update()
             if (!room.TryGetRandomPointInBounds(roomPointInset, out Vector3 candidate))
                 continue;
 
-            float distance = Vector3.Distance(transform.position, candidate);
-            if (distance < minimumIdleMoveDistance)
+            if (!TryGetQualifiedMovementPoint(candidate, minimumIdleMoveDistance, false, out Vector3 qualifiedPoint))
                 continue;
 
-            if (!NavMesh.SamplePosition(candidate, out NavMeshHit navHit, 2f, NavMesh.AllAreas))
+            if (!room.ContainsPoint(qualifiedPoint))
                 continue;
 
-            if (!room.ContainsPoint(navHit.position))
+            if (!IsPathReachable(qualifiedPoint))
                 continue;
 
-            if (!HasPointClearance(navHit.position))
-                continue;
-
-            if (!IsPathReachable(navHit.position))
-                continue;
-
-            candidates.Add(navHit.position);
+            candidates.Add(qualifiedPoint);
         }
     }
 
@@ -783,23 +813,16 @@ private void Update()
             randomOffset.y = 0f;
             Vector3 candidate = transform.position + randomOffset;
 
-            float distance = Vector3.Distance(transform.position, candidate);
-            if (distance < minimumIdleMoveDistance)
+            if (!TryGetQualifiedMovementPoint(candidate, minimumIdleMoveDistance, false, out Vector3 qualifiedPoint))
                 continue;
 
-            if (!NavMesh.SamplePosition(candidate, out NavMeshHit navHit, 2f, NavMesh.AllAreas))
+            if (currentRoom != null && currentRoom.ContainsPoint(qualifiedPoint))
                 continue;
 
-            if (currentRoom != null && currentRoom.ContainsPoint(navHit.position))
+            if (!IsPathReachable(qualifiedPoint))
                 continue;
 
-            if (!HasPointClearance(navHit.position))
-                continue;
-
-            if (!IsPathReachable(navHit.position))
-                continue;
-
-            candidates.Add(navHit.position);
+            candidates.Add(qualifiedPoint);
         }
     }
 
@@ -811,20 +834,13 @@ private void Update()
             randomOffset.y = 0f;
             Vector3 candidate = transform.position + randomOffset;
 
-            float distance = Vector3.Distance(transform.position, candidate);
-            if (distance < minimumIdleMoveDistance)
+            if (!TryGetQualifiedMovementPoint(candidate, minimumIdleMoveDistance, false, out Vector3 qualifiedPoint))
                 continue;
 
-            if (!NavMesh.SamplePosition(candidate, out NavMeshHit navHit, 2f, NavMesh.AllAreas))
+            if (!IsPathReachable(qualifiedPoint))
                 continue;
 
-            if (!HasPointClearance(navHit.position))
-                continue;
-
-            if (!IsPathReachable(navHit.position))
-                continue;
-
-            currentIdlePoint = navHit.position;
+            currentIdlePoint = qualifiedPoint;
             hasIdlePoint = true;
             return true;
         }
@@ -918,7 +934,10 @@ private void Update()
         bool wasLit = bestRoom.IsLit();
 
         if (!IsPathReachable(bestPoint) && !TryHandleDoorForDestination(bestPoint))
+        {
+            RememberLocation(bestPoint);
             return false;
+        }
 
         Narrate("There's a lit area over there. That should help.", "perception-visible-comfort-target");
 
@@ -940,7 +959,10 @@ private void Update()
             return false;
 
         if (!IsPathReachable(bestZone.lastKnownPosition) && !TryHandleDoorForDestination(bestZone.lastKnownPosition))
+        {
+            RememberLocation(bestZone.lastKnownPosition);
             return false;
+        }
 
         Narrate("I remember a lit place. I'll head there.", "recall-comfort-known-lit");
 
@@ -960,7 +982,10 @@ private void Update()
             return false;
 
         if (!IsPathReachable(bestZone.lastKnownPosition) && !TryHandleDoorForDestination(bestZone.lastKnownPosition))
+        {
+            RememberLocation(bestZone.lastKnownPosition);
             return false;
+        }
 
         Narrate("I've been near a place that might help. I'll try it again.", "recall-comfort-potential");
 
@@ -984,17 +1009,76 @@ private void Update()
         return worldArea != null && worldArea.IsDaytime();
     }
 
-    private bool IsPathReachable(Vector3 destination)
+    private bool TryCalculatePathTo(Vector3 destination, out NavMeshPath path)
     {
+        path = new NavMeshPath();
+
         if (!agent.isOnNavMesh)
             return false;
-
-        NavMeshPath path = new NavMeshPath();
 
         if (!agent.CalculatePath(destination, path))
             return false;
 
+        return true;
+    }
+
+    private NavMeshPathStatus GetPathStatus(Vector3 destination)
+    {
+        if (!TryCalculatePathTo(destination, out NavMeshPath path))
+            return NavMeshPathStatus.PathInvalid;
+
+        return path.status;
+    }
+
+    private bool IsPathReachable(Vector3 destination)
+    {
+        if (!TryCalculatePathTo(destination, out NavMeshPath path))
+            return false;
+
         return path.status == NavMeshPathStatus.PathComplete;
+    }
+
+    private bool TryGetQualifiedMovementPoint(Vector3 candidate, float minimumTravelDistance, bool avoidRecentVisit, out Vector3 qualifiedPoint)
+    {
+        qualifiedPoint = candidate;
+
+        if (Vector3.Distance(transform.position, candidate) < Mathf.Max(0f, minimumTravelDistance))
+            return false;
+
+        if (avoidRecentVisit && IsRecentlyVisited(candidate))
+            return false;
+
+        if (!NavMesh.SamplePosition(candidate, out NavMeshHit navHit, Mathf.Max(0.2f, movementPointSampleDistance), NavMesh.AllAreas))
+            return false;
+
+        if (avoidRecentVisit && IsRecentlyVisited(navHit.position))
+            return false;
+
+        if (!IsMovementPointUsable(navHit.position))
+            return false;
+
+        qualifiedPoint = navHit.position;
+        return true;
+    }
+
+    private bool IsMovementPointUsable(Vector3 point)
+    {
+        if (!HasPointClearance(point))
+            return false;
+
+        return !IsMovementPointTooNearWall(point);
+    }
+
+    private bool IsMovementPointTooNearWall(Vector3 point)
+    {
+        float minimumWallDistance = Mathf.Max(0f, minimumMovementPointWallDistance);
+        if (minimumWallDistance <= 0.001f)
+            return false;
+
+        if (!NavMesh.FindClosestEdge(point, out NavMeshHit edgeHit, NavMesh.AllAreas))
+            return false;
+
+        return edgeHit.distance < minimumWallDistance;
     }
 
     private bool CanSeePoint(Vector3 targetPoint)
@@ -1132,6 +1216,7 @@ private void Update()
         Vector3 targetPosition = remembered != null ? remembered.lastKnownPosition : interactable.GetInteractionPoint();
         if (!IsPathReachable(targetPosition) && !TryHandleDoorForDestination(targetPosition))
         {
+            RememberLocation(targetPosition);
             ClearActiveTargets();
             return false;
         }
@@ -1164,6 +1249,7 @@ private void Update()
         Vector3 targetPosition = currentTarget.GetInteractionPoint();
         if (!IsPathReachable(targetPosition) && !TryHandleDoorForDestination(targetPosition))
         {
+            RememberLocation(targetPosition);
             ClearActiveTargets();
             return false;
         }
@@ -1192,6 +1278,7 @@ private void Update()
 
         if (!IsPathReachable(bestMemory.lastKnownPosition) && !TryHandleDoorForDestination(bestMemory.lastKnownPosition))
         {
+            RememberLocation(bestMemory.lastKnownPosition);
             ClearActiveTargets();
             return false;
         }
@@ -1228,33 +1315,20 @@ private void Update()
 
         agent.speed = GetActionMoveSpeed();
         Vector3 targetPosition = currentTarget.GetInteractionPoint();
-        BeginMovementGoal(targetPosition);
-        agent.SetDestination(targetPosition);
-
-        if (TryRedirectPartialPathToPendingDoor(targetPosition, "CurrentTarget"))
+        MovementRouteStepResult routeStep = ExecuteMovementRouteStep(targetPosition, currentTarget.interactionRange, "CurrentTarget");
+        if (routeStep.redirectedToDoor)
             return;
 
-        if (TryRecoverMovementGoal(targetPosition, "CurrentTarget"))
+        if (routeStep.failed)
         {
-            if (TryHandleDoorForDestination(targetPosition))
-                return;
-
-            if (TryGetBlockingDoorTowards(targetPosition, out DoorInteractable stalledDoor))
-            {
-                DoorController stalledController = stalledDoor?.GetDoorController();
-                if (stalledController != null && stalledController.IsLocked && !HasMatchingInventoryKey(stalledController))
-                {
-                    if (TryAcquireMatchingKeyForLockedDoor(stalledController.RequiredKeyId))
-                        return;
-                }
-            }
-
+            RememberLocation(targetPosition);
+            LogMovementFailure("CurrentTarget", targetPosition, routeStep.failureKind, routeStep.recoveryResult);
             Narrate("Something is blocking this route. I'll search for another path.", "move-target-stalled-fallback");
             HandleNeedActionFailure();
             return;
         }
 
-        if (!agent.pathPending && agent.remainingDistance <= currentTarget.interactionRange)
+        if (routeStep.arrived)
         {
             ClearMovementGoal();
             ChangeState(AIState.InteractWithTarget);
@@ -1291,34 +1365,21 @@ private void Update()
             }
 
             agent.speed = GetActionMoveSpeed();
-            BeginMovementGoal(currentComfortZoneTarget.lastKnownPosition);
-            agent.SetDestination(currentComfortZoneTarget.lastKnownPosition);
-
-            if (TryRedirectPartialPathToPendingDoor(currentComfortZoneTarget.lastKnownPosition, "RememberedComfortZone"))
+            MovementRouteStepResult comfortRouteStep = ExecuteMovementRouteStep(currentComfortZoneTarget.lastKnownPosition, rememberedComfortZoneStopDistance, "RememberedComfortZone");
+            if (comfortRouteStep.redirectedToDoor)
                 return;
 
-            if (TryRecoverMovementGoal(currentComfortZoneTarget.lastKnownPosition, "RememberedComfortZone"))
+            if (comfortRouteStep.failed)
             {
-                if (TryHandleDoorForDestination(currentComfortZoneTarget.lastKnownPosition))
-                    return;
-
-                if (TryGetBlockingDoorTowards(currentComfortZoneTarget.lastKnownPosition, out DoorInteractable stalledDoorCZ))
-                {
-                    DoorController stalledControllerCZ = stalledDoorCZ?.GetDoorController();
-                    if (stalledControllerCZ != null && stalledControllerCZ.IsLocked && !HasMatchingInventoryKey(stalledControllerCZ))
-                    {
-                        if (TryAcquireMatchingKeyForLockedDoor(stalledControllerCZ.RequiredKeyId))
-                            return;
-                    }
-                }
-
+                RememberLocation(currentComfortZoneTarget.lastKnownPosition);
+                LogMovementFailure("RememberedComfortZone", currentComfortZoneTarget.lastKnownPosition, comfortRouteStep.failureKind, comfortRouteStep.recoveryResult);
                 Narrate("I can't reach that lit area from here. I'll find another option.", "move-remembered-comfort-stalled-fallback");
                 currentComfortZoneTarget = null;
                 HandleNeedActionFailure();
                 return;
             }
 
-            if (!agent.pathPending && agent.remainingDistance <= rememberedComfortZoneStopDistance)
+            if (comfortRouteStep.arrived)
             {
                 ClearMovementGoal();
                 if (IsNeedCurrentlySatisfied(NeedType.Comfort))
@@ -1350,27 +1411,14 @@ private void Update()
             return;
 
         agent.speed = GetActionMoveSpeed();
-        BeginMovementGoal(currentMemoryTarget.lastKnownPosition);
-        agent.SetDestination(currentMemoryTarget.lastKnownPosition);
-
-        if (TryRedirectPartialPathToPendingDoor(currentMemoryTarget.lastKnownPosition, "RememberedTarget"))
+        MovementRouteStepResult rememberedRouteStep = ExecuteMovementRouteStep(currentMemoryTarget.lastKnownPosition, rememberedTargetStopDistance, "RememberedTarget");
+        if (rememberedRouteStep.redirectedToDoor)
             return;
 
-        if (TryRecoverMovementGoal(currentMemoryTarget.lastKnownPosition, "RememberedTarget"))
+        if (rememberedRouteStep.failed)
         {
-            if (TryHandleDoorForDestination(currentMemoryTarget.lastKnownPosition))
-                return;
-
-            if (TryGetBlockingDoorTowards(currentMemoryTarget.lastKnownPosition, out DoorInteractable stalledDoorMT))
-            {
-                DoorController stalledControllerMT = stalledDoorMT?.GetDoorController();
-                if (stalledControllerMT != null && stalledControllerMT.IsLocked && !HasMatchingInventoryKey(stalledControllerMT))
-                {
-                    if (TryAcquireMatchingKeyForLockedDoor(stalledControllerMT.RequiredKeyId))
-                        return;
-                }
-            }
-
+            RememberLocation(currentMemoryTarget.lastKnownPosition);
+            LogMovementFailure("RememberedTarget", currentMemoryTarget.lastKnownPosition, rememberedRouteStep.failureKind, rememberedRouteStep.recoveryResult);
             Narrate("This route is blocked. I'll try a different lead.", "move-remembered-target-stalled-fallback");
             currentMemoryTarget = null;
             currentTarget = null;
@@ -1378,7 +1426,7 @@ private void Update()
             return;
         }
 
-        if (!agent.pathPending && agent.remainingDistance <= rememberedTargetStopDistance)
+        if (rememberedRouteStep.arrived)
         {
             ClearMovementGoal();
             if (currentTarget != null && currentTarget.CanInteract(gameObject) && CanSeeInteractable(currentTarget))
@@ -2921,6 +2969,7 @@ private void HandleRestingState()
         if (!IsPathReachable(targetPosition) && !TryHandleDoorForDestination(targetPosition))
         {
             DebugFlow($"[PickupTarget] Selected {currentTarget.name} but destination is unreachable.");
+            RememberLocation(targetPosition);
             ClearActiveTargets();
             return false;
         }
@@ -2986,6 +3035,7 @@ private void HandleRestingState()
         Vector3 targetPosition = currentTarget.GetInteractionPoint();
         if (!IsPathReachable(targetPosition) && !TryHandleDoorForDestination(targetPosition))
         {
+            RememberLocation(targetPosition);
             ClearActiveTargets();
             return false;
         }
@@ -3209,7 +3259,7 @@ private void HandleRestingState()
         routeCoordinator.DebugMovement(message);
     }
 
-    private bool TryRecoverMovementGoal(Vector3 target, string contextTag)
+    private NpcRouteCoordinator.MovementRecoveryResult EvaluateMovementRecovery(Vector3 target, string contextTag)
     {
         return routeCoordinator.TryRecoverMovementGoal(
             agent,
@@ -3220,7 +3270,105 @@ private void HandleRestingState()
             GetMovementRecoverySettings(),
             obstacleLayer,
             IsPathReachable,
+            IsMovementRecoveryPointUsable,
             contextTag);
+    }
+
+    private MovementRouteStepResult ExecuteMovementRouteStep(Vector3 target, float stopDistance, string contextTag)
+    {
+        MovementRouteStepResult result = default;
+
+        BeginMovementGoal(target);
+        agent.SetDestination(target);
+
+        if (TryRedirectPartialPathToPendingDoor(target, contextTag))
+        {
+            result.redirectedToDoor = true;
+            return result;
+        }
+
+        result.recoveryResult = EvaluateMovementRecovery(target, contextTag);
+        if (result.recoveryResult.failed)
+        {
+            result.failed = true;
+            result.failureKind = ClassifyMovementFailure(target, result.recoveryResult, UsesStrictPointQuality(contextTag));
+
+            if (result.failureKind == MovementFailureKind.BlockedByDoor)
+            {
+                if (TryHandleDoorForDestination(target))
+                    result.failed = false;
+            }
+            else if (result.failureKind == MovementFailureKind.BlockedByObstacle && TryAcquireKeyForBlockingDoorOnFailure(target))
+            {
+                result.failed = false;
+            }
+
+            return result;
+        }
+
+        result.arrived = !agent.pathPending && agent.remainingDistance <= stopDistance;
+        return result;
+    }
+
+    private bool UsesStrictPointQuality(string contextTag)
+    {
+        return contextTag == "ExplorePoint" ||
+               contextTag == "IdleWander" ||
+               contextTag == "RememberedComfortZone";
+    }
+
+    private bool IsMovementRecoveryPointUsable(Vector3 point)
+    {
+        return IsMovementPointUsable(point);
+    }
+
+    private MovementFailureKind ClassifyMovementFailure(
+        Vector3 target,
+        NpcRouteCoordinator.MovementRecoveryResult recoveryResult,
+        bool useStrictPointQuality)
+    {
+        if (TryGetBlockingDoorTowards(target, out _))
+            return MovementFailureKind.BlockedByDoor;
+
+        if (recoveryResult.trigger == NpcRouteCoordinator.MovementRecoveryTrigger.StallTimeout ||
+            recoveryResult.trigger == NpcRouteCoordinator.MovementRecoveryTrigger.NoProgressTimeout ||
+            recoveryResult.trigger == NpcRouteCoordinator.MovementRecoveryTrigger.GoalTimeout)
+        {
+            return MovementFailureKind.NoProgressDeadlock;
+        }
+
+        if (useStrictPointQuality && !IsMovementPointUsable(target))
+            return MovementFailureKind.BadChosenPoint;
+
+        if (recoveryResult.pathStatus == NavMeshPathStatus.PathInvalid)
+            return useStrictPointQuality ? MovementFailureKind.BadChosenPoint : MovementFailureKind.BlockedByObstacle;
+
+        if (recoveryResult.pathStatus == NavMeshPathStatus.PathPartial)
+            return useStrictPointQuality ? MovementFailureKind.BadChosenPoint : MovementFailureKind.BlockedByObstacle;
+
+        return MovementFailureKind.BlockedByObstacle;
+    }
+
+    private bool TryAcquireKeyForBlockingDoorOnFailure(Vector3 target)
+    {
+        if (!TryGetBlockingDoorTowards(target, out DoorInteractable stalledDoor))
+            return false;
+
+        DoorController stalledController = stalledDoor?.GetDoorController();
+        if (stalledController == null || !stalledController.IsLocked || HasMatchingInventoryKey(stalledController))
+            return false;
+
+        return TryAcquireMatchingKeyForLockedDoor(stalledController.RequiredKeyId);
+    }
+
+    private void LogMovementFailure(
+        string contextTag,
+        Vector3 target,
+        MovementFailureKind failureKind,
+        NpcRouteCoordinator.MovementRecoveryResult recoveryResult)
+    {
+        DebugMovement(
+            $"[{contextTag}] Route failure classified as {failureKind} @ {target} | trigger={recoveryResult.trigger} | action={recoveryResult.action} | path={recoveryResult.pathStatus}");
     }
 
     private bool TryGetBlockingDoorTowards(Vector3 destination, out DoorInteractable door)
@@ -3496,7 +3644,7 @@ private void HandleRestingState()
             if (Vector3.Distance(hit.position, doorAnchor) <= 0.1f)
                 continue;
 
-            if (!HasPointClearance(hit.position))
+            if (!IsMovementPointUsable(hit.position))
                 continue;
 
             if (!IsPathReachable(hit.position))

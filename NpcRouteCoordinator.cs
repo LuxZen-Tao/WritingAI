@@ -5,6 +5,35 @@ using UnityEngine.AI;
 
 public class NpcRouteCoordinator
 {
+    public enum MovementRecoveryTrigger
+    {
+        None,
+        StallTimeout,
+        NoProgressTimeout,
+        GoalTimeout,
+        PathDegraded,
+        TooManyRecoveries
+    }
+
+    public enum MovementRecoveryAction
+    {
+        None,
+        SoftRepath,
+        AlternateApproach,
+        LocalUnstuck,
+        FailGoal
+    }
+
+    public struct MovementRecoveryResult
+    {
+        public bool failed;
+        public bool attemptedRecovery;
+        public MovementRecoveryTrigger trigger;
+        public MovementRecoveryAction action;
+        public int recoveryAttempt;
+        public NavMeshPathStatus pathStatus;
+    }
+
     public enum RouteSubgoalType
     {
         LockedDoorKeyResolution
@@ -105,7 +134,7 @@ public class NpcRouteCoordinator
         return hits == null || hits.Length == 0;
     }
 
-    public bool TryRecoverMovementGoal(
+    public MovementRecoveryResult TryRecoverMovementGoal(
         NavMeshAgent agent,
         Vector3 currentPosition,
         Vector3 target,
@@ -114,56 +143,71 @@ public class NpcRouteCoordinator
         MovementRecoverySettings settings,
         LayerMask obstacleLayer,
         Func<Vector3, bool> isPathReachable,
+        Func<Vector3, bool> isRecoveryPointUsable,
         string contextTag)
     {
-        UpdateMovementProgress(agent, currentPosition, target, now, deltaTime, settings);
+        MovementRecoveryResult result = default;
+        result.pathStatus = agent != null && agent.hasPath ? agent.pathStatus : NavMeshPathStatus.PathInvalid;
 
-        bool timedOut = HasMovementGoalTimedOut(now, settings);
-        bool pathFailed = movementPathFailureCount >= Mathf.Max(1, settings.movementPathFailureLimit);
+        UpdateMovementProgress(agent, currentPosition, target, now, deltaTime, settings, ref result);
+
+        MovementRecoveryTrigger trigger = GetMovementRecoveryTrigger(now, settings);
         bool attemptsExceeded = movementGoalRecoveryAttempts >= Mathf.Max(1, settings.maxMovementRecoveryAttempts);
-        if (!timedOut && !pathFailed && !attemptsExceeded)
-            return false;
+        if (trigger == MovementRecoveryTrigger.None && !attemptsExceeded)
+            return result;
 
         if (attemptsExceeded)
         {
             DebugMovement($"[{contextTag}] Abandoning goal after too many recoveries.");
             ClearMovementGoal();
-            return true;
+            result.failed = true;
+            result.trigger = MovementRecoveryTrigger.TooManyRecoveries;
+            result.action = MovementRecoveryAction.FailGoal;
+            result.recoveryAttempt = movementGoalRecoveryAttempts;
+            return result;
         }
 
         movementGoalRecoveryAttempts++;
         stallTimer = 0f;
-        DebugMovement($"[{contextTag}] Recovery attempt {movementGoalRecoveryAttempts}");
+        result.trigger = trigger;
+        result.recoveryAttempt = movementGoalRecoveryAttempts;
+        result.attemptedRecovery = true;
+        DebugMovement($"[{contextTag}] Recovery attempt {movementGoalRecoveryAttempts} after {trigger}");
 
         if (movementGoalRecoveryAttempts == 1)
         {
             agent.ResetPath();
             agent.SetDestination(target);
             MarkMovementProgress("soft-repath", now);
-            return false;
+            result.action = MovementRecoveryAction.SoftRepath;
+            return result;
         }
 
         if (movementGoalRecoveryAttempts == 2 &&
-            TryFindNearbyRecoveryPoint(target, settings.movementRecoverySampleRadius, obstacleLayer, isPathReachable, settings.movementPointClearanceRadius, out Vector3 angledPoint))
+            TryFindNearbyRecoveryPoint(target, settings.movementRecoverySampleRadius, obstacleLayer, isPathReachable, isRecoveryPointUsable, settings.movementPointClearanceRadius, out Vector3 angledPoint))
         {
             agent.ResetPath();
             agent.SetDestination(angledPoint);
             MarkMovementProgress("offset-approach", now);
-            return false;
+            result.action = MovementRecoveryAction.AlternateApproach;
+            return result;
         }
 
         if (movementGoalRecoveryAttempts == 3 &&
-            TryFindNearbyRecoveryPoint(currentPosition, settings.movementRecoveryUnstuckRadius, obstacleLayer, isPathReachable, settings.movementPointClearanceRadius, out Vector3 unstuckPoint))
+            TryFindNearbyRecoveryPoint(currentPosition, settings.movementRecoveryUnstuckRadius, obstacleLayer, isPathReachable, isRecoveryPointUsable, settings.movementPointClearanceRadius, out Vector3 unstuckPoint))
         {
             agent.ResetPath();
             agent.SetDestination(unstuckPoint);
             MarkMovementProgress("local-unstuck", now);
-            return false;
+            result.action = MovementRecoveryAction.LocalUnstuck;
+            return result;
         }
 
         DebugMovement($"[{contextTag}] Recovery exhausted, abandoning local route point.");
         ClearMovementGoal();
-        return true;
+        result.failed = true;
+        result.action = MovementRecoveryAction.FailGoal;
+        return result;
     }
 
     public bool TryPushLockedDoorSubgoal(
@@ -287,7 +331,8 @@ public class NpcRouteCoordinator
         Vector3 target,
         float now,
         float deltaTime,
-        MovementRecoverySettings settings)
+        MovementRecoverySettings settings,
+        ref MovementRecoveryResult result)
     {
         if (!hasActiveMovementGoal)
             BeginMovementGoal(target, currentPosition, now);
@@ -301,6 +346,8 @@ public class NpcRouteCoordinator
 
         if (!agent.pathPending && agent.hasPath)
         {
+            result.pathStatus = agent.pathStatus;
+
             if (agent.remainingDistance + settings.movementProgressPathDistanceThreshold < movementGoalBestDistance)
             {
                 movementGoalBestDistance = agent.remainingDistance;
@@ -317,6 +364,7 @@ public class NpcRouteCoordinator
         if (!agent.isOnNavMesh || agent.pathPending || !agent.hasPath)
         {
             stallTimer = 0f;
+            result.pathStatus = NavMeshPathStatus.PathInvalid;
             return;
         }
 
@@ -332,30 +380,36 @@ public class NpcRouteCoordinator
             stallTimer = 0f;
     }
 
-    private bool HasMovementGoalTimedOut(float now, MovementRecoverySettings settings)
+    private MovementRecoveryTrigger GetMovementRecoveryTrigger(float now, MovementRecoverySettings settings)
     {
         if (!hasActiveMovementGoal)
-            return false;
+            return MovementRecoveryTrigger.None;
+
+        if (movementPathFailureCount >= Mathf.Max(1, settings.movementPathFailureLimit))
+        {
+            DebugMovement($"Path degraded too many times ({movementPathFailureCount} >= {Mathf.Max(1, settings.movementPathFailureLimit)})");
+            return MovementRecoveryTrigger.PathDegraded;
+        }
 
         if (stallTimer >= settings.stallTimeThreshold)
         {
             DebugMovement($"Stall timeout ({stallTimer:F2}s >= {settings.stallTimeThreshold:F2}s)");
-            return true;
+            return MovementRecoveryTrigger.StallTimeout;
         }
 
         if (now - movementLastProgressTime >= settings.movementNoProgressTimeout)
         {
             DebugMovement($"No-progress timeout ({now - movementLastProgressTime:F2}s >= {settings.movementNoProgressTimeout:F2}s)");
-            return true;
+            return MovementRecoveryTrigger.NoProgressTimeout;
         }
 
         if (now - movementGoalStartTime >= settings.movementGoalTimeout)
         {
             DebugMovement($"Goal timeout ({now - movementGoalStartTime:F2}s >= {settings.movementGoalTimeout:F2}s)");
-            return true;
+            return MovementRecoveryTrigger.GoalTimeout;
         }
 
-        return false;
+        return MovementRecoveryTrigger.None;
     }
 
     private bool TryFindNearbyRecoveryPoint(
@@ -363,6 +417,7 @@ public class NpcRouteCoordinator
         float radius,
         LayerMask obstacleLayer,
         Func<Vector3, bool> isPathReachable,
+        Func<Vector3, bool> isRecoveryPointUsable,
         float clearanceRadius,
         out Vector3 point)
     {
@@ -374,6 +429,9 @@ public class NpcRouteCoordinator
                 continue;
 
             if (!HasPointClearance(hit.position, obstacleLayer, clearanceRadius))
+                continue;
+
+            if (isRecoveryPointUsable != null && !isRecoveryPointUsable(hit.position))
                 continue;
 
             if (!isPathReachable(hit.position))
