@@ -931,31 +931,7 @@ public class SimpleNPCBrain : MonoBehaviour
 
     private bool TryMoveToRememberedComfortZone()
     {
-        RememberedComfortZone bestZone = null;
-        float bestDistance = Mathf.Infinity;
-
-        for (int i = 0; i < rememberedComfortZones.Count; i++)
-        {
-            RememberedComfortZone zone = rememberedComfortZones[i];
-
-            if (zone == null || zone.room == null)
-                continue;
-
-            bool currentlyLit = zone.room.IsLit();
-            bool knownLit = currentlyLit || zone.wasLitWhenLastSeen;
-
-            if (!knownLit)
-                continue;
-
-            float distance = Vector3.Distance(transform.position, zone.lastKnownPosition);
-            if (distance < bestDistance)
-            {
-                bestDistance = distance;
-                bestZone = zone;
-            }
-        }
-
-        if (bestZone == null)
+        if (!memoryService.TryFindBestRememberedComfortZone(rememberedComfortZones, transform.position, true, out RememberedComfortZone bestZone))
             return false;
 
         if (!IsPathReachable(bestZone.lastKnownPosition) && !TryHandleDoorForDestination(bestZone.lastKnownPosition))
@@ -975,25 +951,7 @@ public class SimpleNPCBrain : MonoBehaviour
 
     private bool TryMoveToRememberedPotentialComfortZone()
     {
-        RememberedComfortZone bestZone = null;
-        float bestDistance = Mathf.Infinity;
-
-        for (int i = 0; i < rememberedComfortZones.Count; i++)
-        {
-            RememberedComfortZone zone = rememberedComfortZones[i];
-
-            if (zone == null || zone.room == null)
-                continue;
-
-            float distance = Vector3.Distance(transform.position, zone.lastKnownPosition);
-            if (distance < bestDistance)
-            {
-                bestDistance = distance;
-                bestZone = zone;
-            }
-        }
-
-        if (bestZone == null)
+        if (!memoryService.TryFindBestRememberedComfortZone(rememberedComfortZones, transform.position, false, out RememberedComfortZone bestZone))
             return false;
 
         if (!IsPathReachable(bestZone.lastKnownPosition) && !TryHandleDoorForDestination(bestZone.lastKnownPosition))
@@ -1147,41 +1105,7 @@ public class SimpleNPCBrain : MonoBehaviour
 
     private bool TryUseRememberedActivityTarget(float maxDistance)
     {
-        ForgetInvalidMemories();
-
-        RememberedInteractable bestMemory = null;
-        float bestScore = float.MinValue;
-        float bestDistance = Mathf.Infinity;
-
-        for (int i = 0; i < memory.Count; i++)
-        {
-            RememberedInteractable remembered = memory[i];
-            if (remembered == null || remembered.interactable == null)
-                continue;
-
-            if (!remembered.isActivity)
-                continue;
-
-            if (!(remembered.interactable is IActivityInteractable activity))
-                continue;
-
-            if (!remembered.interactable.isEnabled || !remembered.interactable.CanInteract(gameObject))
-                continue;
-
-            float distance = Vector3.Distance(transform.position, remembered.lastKnownPosition);
-            if (distance > maxDistance)
-                continue;
-
-            float score = activity.GetDesirability() / (1f + distance);
-            if (score > bestScore || (Mathf.Approximately(score, bestScore) && distance < bestDistance))
-            {
-                bestMemory = remembered;
-                bestScore = score;
-                bestDistance = distance;
-            }
-        }
-
-        if (bestMemory == null)
+        if (!memoryService.TryFindBestRememberedActivityTarget(memory, gameObject, transform.position, maxDistance, out RememberedInteractable bestMemory))
             return false;
 
         if (!BeginDowntimeTargetMove(bestMemory.interactable, bestMemory))
@@ -1245,53 +1169,7 @@ public class SimpleNPCBrain : MonoBehaviour
 
     private bool TryUseRememberedTarget(NeedType needType, float maxDistance = Mathf.Infinity)
     {
-        ForgetInvalidMemories();
-
-        RememberedInteractable bestMemory = null;
-        float bestDistance = Mathf.Infinity;
-        float bestScore = float.MinValue;
-
-        foreach (RememberedInteractable remembered in memory)
-        {
-            if (remembered == null || remembered.interactable == null)
-                continue;
-
-            if (remembered.needType != needType)
-                continue;
-
-            if (remembered.isActivity)
-                continue;
-
-            if (remembered.interactable is IKeyItem)
-            {
-                WarnInvariant("Invariant: remembered key appeared in need-target selection path. Skipping it.");
-                continue;
-            }
-
-            if (!(remembered.interactable is INeedSatisfier))
-                continue;
-
-            if (!remembered.interactable.isEnabled || !remembered.interactable.CanInteract(gameObject))
-                continue;
-
-            float distance = Vector3.Distance(transform.position, remembered.lastKnownPosition);
-            if (distance > maxDistance)
-                continue;
-
-            RestInteractable restInteractable = remembered.interactable as RestInteractable;
-            float score = restInteractable != null
-                ? restInteractable.Desirability / (1f + distance)
-                : -distance;
-
-            if (score > bestScore || (Mathf.Approximately(score, bestScore) && distance < bestDistance))
-            {
-                bestMemory = remembered;
-                bestDistance = distance;
-                bestScore = score;
-            }
-        }
-
-        if (bestMemory == null)
+        if (!memoryService.TryFindBestRememberedNeedTarget(memory, needType, gameObject, transform.position, maxDistance, out RememberedInteractable bestMemory))
             return false;
 
         Narrate(Pick(
@@ -2200,11 +2078,6 @@ private void HandleRestingState()
             Narrate("I'll remember this for later.", "memory-new-interactable-" + interactable.GetInstanceID());
     }
 
-    private void ForgetInvalidMemories()
-    {
-        memoryService.ForgetInvalidMemories(memory);
-    }
-
     private void CleanupInteractableMemory()
     {
         memoryService.CleanupInteractableMemory(memory, interactableMemoryDuration, Time.time);
@@ -3040,25 +2913,7 @@ private void HandleRestingState()
 
     private bool HasEasyRememberedOpportunity(NeedType needType, float maxDistance)
     {
-        ForgetInvalidMemories();
-
-        for (int i = 0; i < memory.Count; i++)
-        {
-            RememberedInteractable remembered = memory[i];
-            if (remembered == null || remembered.interactable == null)
-                continue;
-
-            if (remembered.needType != needType)
-                continue;
-
-            if (!remembered.interactable.isEnabled || !remembered.interactable.CanInteract(gameObject))
-                continue;
-
-            if (Vector3.Distance(transform.position, remembered.lastKnownPosition) <= maxDistance)
-                return true;
-        }
-
-        return false;
+        return memoryService.HasRememberedOpportunity(memory, needType, gameObject, transform.position, maxDistance);
     }
 
     private bool HasEasyVisibleComfortLightOpportunity()

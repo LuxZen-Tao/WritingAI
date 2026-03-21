@@ -247,4 +247,188 @@ public class NpcMemoryService
 
         return bestMemory != null;
     }
+
+    public bool TryFindBestRememberedNeedTarget(
+        List<RememberedInteractable> memory,
+        NeedType needType,
+        GameObject actor,
+        Vector3 originPosition,
+        float maxDistance,
+        out RememberedInteractable bestMemory)
+    {
+        bestMemory = null;
+        if (memory == null)
+            return false;
+
+        ForgetInvalidMemories(memory);
+
+        float bestDistance = Mathf.Infinity;
+        float bestScore = float.MinValue;
+
+        for (int i = 0; i < memory.Count; i++)
+        {
+            RememberedInteractable remembered = memory[i];
+            if (!IsRememberedNeedTargetCandidate(remembered, needType, actor))
+                continue;
+
+            float distance = Vector3.Distance(originPosition, remembered.lastKnownPosition);
+            if (distance > maxDistance)
+                continue;
+
+            RestInteractable restInteractable = remembered.interactable as RestInteractable;
+            float score = restInteractable != null
+                ? restInteractable.Desirability / (1f + distance)
+                : -distance;
+
+            if (score > bestScore || (Mathf.Approximately(score, bestScore) && distance < bestDistance))
+            {
+                bestMemory = remembered;
+                bestDistance = distance;
+                bestScore = score;
+            }
+        }
+
+        return bestMemory != null;
+    }
+
+    public bool TryFindBestRememberedActivityTarget(
+        List<RememberedInteractable> memory,
+        GameObject actor,
+        Vector3 originPosition,
+        float maxDistance,
+        out RememberedInteractable bestMemory)
+    {
+        bestMemory = null;
+        if (memory == null)
+            return false;
+
+        ForgetInvalidMemories(memory);
+
+        float bestDistance = Mathf.Infinity;
+        float bestScore = float.MinValue;
+
+        for (int i = 0; i < memory.Count; i++)
+        {
+            RememberedInteractable remembered = memory[i];
+            if (!IsRememberedActivityCandidate(remembered, actor))
+                continue;
+
+            float distance = Vector3.Distance(originPosition, remembered.lastKnownPosition);
+            if (distance > maxDistance)
+                continue;
+
+            IActivityInteractable activity = remembered.interactable as IActivityInteractable;
+            float score = activity.GetDesirability() / (1f + distance);
+            if (score > bestScore || (Mathf.Approximately(score, bestScore) && distance < bestDistance))
+            {
+                bestMemory = remembered;
+                bestDistance = distance;
+                bestScore = score;
+            }
+        }
+
+        return bestMemory != null;
+    }
+
+    public bool TryFindBestRememberedComfortZone(
+        List<RememberedComfortZone> rememberedComfortZones,
+        Vector3 originPosition,
+        bool requireKnownLit,
+        out RememberedComfortZone bestZone)
+    {
+        bestZone = null;
+        if (rememberedComfortZones == null)
+            return false;
+
+        float bestDistance = Mathf.Infinity;
+
+        for (int i = 0; i < rememberedComfortZones.Count; i++)
+        {
+            RememberedComfortZone zone = rememberedComfortZones[i];
+            if (zone == null || zone.room == null)
+                continue;
+
+            if (requireKnownLit)
+            {
+                bool currentlyLit = zone.room.IsLit();
+                bool knownLit = currentlyLit || zone.wasLitWhenLastSeen;
+                if (!knownLit)
+                    continue;
+            }
+
+            float distance = Vector3.Distance(originPosition, zone.lastKnownPosition);
+            if (distance >= bestDistance)
+                continue;
+
+            bestDistance = distance;
+            bestZone = zone;
+        }
+
+        return bestZone != null;
+    }
+
+    public bool HasRememberedOpportunity(
+        List<RememberedInteractable> memory,
+        NeedType needType,
+        GameObject actor,
+        Vector3 originPosition,
+        float maxDistance)
+    {
+        if (memory == null)
+            return false;
+
+        ForgetInvalidMemories(memory);
+
+        for (int i = 0; i < memory.Count; i++)
+        {
+            RememberedInteractable remembered = memory[i];
+            if (remembered == null || remembered.interactable == null)
+                continue;
+
+            if (remembered.needType != needType)
+                continue;
+
+            if (!remembered.interactable.isEnabled || !remembered.interactable.CanInteract(actor))
+                continue;
+
+            if (Vector3.Distance(originPosition, remembered.lastKnownPosition) <= maxDistance)
+                return true;
+        }
+
+        return false;
+    }
+
+    private bool IsRememberedNeedTargetCandidate(RememberedInteractable remembered, NeedType needType, GameObject actor)
+    {
+        if (remembered == null || remembered.interactable == null)
+            return false;
+
+        if (remembered.needType != needType)
+            return false;
+
+        if (remembered.isActivity)
+            return false;
+
+        if (remembered.interactable is IKeyItem)
+            return false;
+
+        if (!(remembered.interactable is INeedSatisfier))
+            return false;
+
+        return remembered.interactable.isEnabled && remembered.interactable.CanInteract(actor);
+    }
+
+    private bool IsRememberedActivityCandidate(RememberedInteractable remembered, GameObject actor)
+    {
+        if (remembered == null || remembered.interactable == null)
+            return false;
+
+        if (!remembered.isActivity)
+            return false;
+
+        if (!(remembered.interactable is IActivityInteractable))
+            return false;
+
+        return remembered.interactable.isEnabled && remembered.interactable.CanInteract(actor);
+    }
 }
