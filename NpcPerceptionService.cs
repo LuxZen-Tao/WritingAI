@@ -71,12 +71,16 @@ public class NpcPerceptionService
     public List<Interactable> GetVisibleInteractables(Transform observer, Vector3 forward)
     {
         List<Interactable> visible = new List<Interactable>();
+        HashSet<Interactable> seenInteractables = new HashSet<Interactable>();
         Collider[] hits = Physics.OverlapSphere(observer.position, visionRange, interactableLayer);
 
         for (int i = 0; i < hits.Length; i++)
         {
             Interactable interactable = hits[i].GetComponentInParent<Interactable>();
             if (interactable == null || !interactable.isEnabled)
+                continue;
+
+            if (!seenInteractables.Add(interactable))
                 continue;
 
             if (!CanSeeInteractable(observer, forward, interactable))

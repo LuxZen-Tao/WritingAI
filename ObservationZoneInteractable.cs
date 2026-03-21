@@ -26,6 +26,7 @@ public class ObservationZoneInteractable : Interactable, IActivityInteractable
     private GameObject activeUser;
     private Transform activeAnchor;
     private int lookChangesThisSession = 0;
+    private Transform lastLookPoint;
 
     public override bool CanInteract(GameObject interactor)
     {
@@ -56,6 +57,7 @@ public class ObservationZoneInteractable : Interactable, IActivityInteractable
 
         activeUser = interactor;
         lookChangesThisSession = 0;
+        lastLookPoint = null;
         activeAnchor = ChooseAnchorPoint();
         return true;
     }
@@ -68,6 +70,7 @@ public class ObservationZoneInteractable : Interactable, IActivityInteractable
         activeUser = null;
         activeAnchor = null;
         lookChangesThisSession = 0;
+        lastLookPoint = null;
     }
 
     public Vector3 GetActivityAnchorPoint()
@@ -100,11 +103,25 @@ public class ObservationZoneInteractable : Interactable, IActivityInteractable
         if (maxLookChanges > 0 && lookChangesThisSession >= maxLookChanges)
             return false;
 
-        Transform chosen = innerLookPoints[Random.Range(0, innerLookPoints.Count)];
+        List<Transform> validPoints = new List<Transform>();
+        for (int i = 0; i < innerLookPoints.Count; i++)
+        {
+            if (innerLookPoints[i] != null)
+                validPoints.Add(innerLookPoints[i]);
+        }
+
+        if (validPoints.Count == 0)
+            return false;
+
+        if (validPoints.Count > 1 && lastLookPoint != null)
+            validPoints.RemoveAll(point => point == lastLookPoint);
+
+        Transform chosen = validPoints[Random.Range(0, validPoints.Count)];
         if (chosen == null)
             return false;
 
         lookChangesThisSession++;
+        lastLookPoint = chosen;
         lookPoint = chosen.position;
         return true;
     }
@@ -121,7 +138,8 @@ public class ObservationZoneInteractable : Interactable, IActivityInteractable
         if (zoneCollider == null)
             return true;
 
-        return zoneCollider.bounds.Contains(worldPosition);
+        Vector3 closestPoint = zoneCollider.ClosestPoint(worldPosition);
+        return (closestPoint - worldPosition).sqrMagnitude <= 0.0001f;
     }
 
     private Transform ChooseAnchorPoint()
@@ -172,5 +190,6 @@ public class ObservationZoneInteractable : Interactable, IActivityInteractable
         activeUser = null;
         activeAnchor = null;
         lookChangesThisSession = 0;
+        lastLookPoint = null;
     }
 }

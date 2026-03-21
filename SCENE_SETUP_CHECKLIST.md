@@ -20,6 +20,13 @@ Use this checklist when creating or debugging a scene so AI failures are easier 
 - Key objects should use `KeyInteractable` with a non-empty `keyId`.
 - Pickupables should remain enabled/active when intended to be visible to perception.
 
+## Activity / Observation Zone Setup
+- Downtime activities should use `ActivityInteractable` or `ObservationZoneInteractable`.
+- `ObservationZoneInteractable` should have an entry point that is reachable on the NavMesh.
+- If a zone uses `seatPoints` or `innerRoamPoints`, those anchor points should also sit on the NavMesh.
+- Add at least one `innerLookPoint` if you want authored head-turn behaviour during the session.
+- If a custom `zoneCollider` is assigned, it should match the authored observation area rather than a large parent bounds volume.
+
 ## Room / Comfort Setup
 - `RoomArea` objects should exist for indoor comfort logic.
 - Room trigger volumes and boundaries should support NPC overlap callbacks.

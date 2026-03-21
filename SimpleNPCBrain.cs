@@ -1649,7 +1649,18 @@ private void Update()
             return;
         }
 
-        if (TryAcquireVisibleTarget(currentNeedType))
+        if (currentTarget != null && currentTarget.CanInteract(gameObject) && CanSeeInteractable(currentTarget))
+        {
+            Narrate("There it is.", "move-remembered-found-target");
+            ChangeState(AIState.MoveToTarget, $"Remembered target {currentTarget.name} became visible and can now be approached directly.");
+            return;
+        }
+
+        bool rememberedTargetSupportsNeedSearch =
+            !currentMemoryTarget.isActivity &&
+            !(currentMemoryTarget.interactable is IKeyItem) &&
+            currentMemoryTarget.interactable is INeedSatisfier;
+        if (rememberedTargetSupportsNeedSearch && TryAcquireVisibleTarget(currentNeedType))
             return;
 
         if (routeCoordinator.SubgoalCount > 0)
